@@ -157,6 +157,10 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 - `API_TOKEN` 与 `Secret` 泄露 = 任何人可读你的消息、冒充你的机器人，妥善保管
 - 本项目与腾讯官方无关，仅调用公开的企业微信智能机器人 API，请遵守企微开发者协议
 
+## 更新记录
+
+见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## License
 
 [MIT](LICENSE)

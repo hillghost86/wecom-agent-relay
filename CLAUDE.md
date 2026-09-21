@@ -50,6 +50,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 - Node 内置 WebSocket 在部分代理环境下对企微网关握手失败，固定用 `ws` 包。
 - 游标语义是「至少一次」：agent 处理完显式 `/ack`，服务端不自动推进；agent 侧按 `msgid` 幂等。
 - HTTP API 只监听 `127.0.0.1`，HTTPS / 域名 / 证书 / 对外端口全归反代（nginx / Caddy / 宝塔），进程不碰证书。
+- **官方 SDK `@wecom/aibot-node-sdk` 暂不引入**（2026-09-22 评估）：它只覆盖连接层，没有落盘、游标、HTTP API、去重、自报；换过去多三个依赖，且默认重连 10 次就放弃。等要做图片 / 语音 / 文件或模板卡片时再用，优先只 import 它的 `downloadFile` 等工具方法，不换连接层。
 
 ## 沟通方式
 
@@ -92,7 +93,8 @@ WorkBuddy 保持的约定：目录布局和仓库一致；不改 `server/`；凭
 1. 从 WorkBuddy 的工作目录拉整个文件夹（位置和 SSH 方式在本机记忆里，不入仓）。看它的 `git log` 和相对上次的 diff，逐条核对：采纳的直接合入，需要改的按仓库风格改，不采纳的在回复里说明原因。`dist/`、`sentinel_cursor.json`、`config.json` 不带过来。
 2. 跑 `server/test_mock.mjs` 和 `client/poll.mjs --health`。
 3. 私有信息扫描：`grep -rniE '<域名关键字>|<userid>|<botid 前缀>|192\.168|[0-9a-f]{64}'`，零命中才能提交。
-4. 提交、推送、打 tag；WorkBuddy 产出的 `dist/wecom-agent-relay.zip` 挂到 GitHub Release，不入库。
-5. 回复里列出本次合并了 WorkBuddy 的哪些改动、改了什么、没采纳什么，供用户转告。
+4. 更新 `CHANGELOG.md`：把「未发布」下的条目归到新版本号并标日期。
+5. 提交、推送、打 tag；WorkBuddy 产出的 `dist/wecom-agent-relay.zip` 挂到 GitHub Release，不入库。
+6. 回复里列出本次合并了 WorkBuddy 的哪些改动、改了什么、没采纳什么，供用户转告。
 
 仓库上线后 WorkBuddy 改为从 GitHub 同步，拉取核对的方向不变。
