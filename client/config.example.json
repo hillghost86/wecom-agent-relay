@@ -1,0 +1,4 @@
+{
+  "api_base": "https://your-domain.example.com",
+  "api_token": "replace-with-the-API_TOKEN-from-server-.env"
+}

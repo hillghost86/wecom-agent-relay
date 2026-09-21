@@ -1,0 +1,70 @@
+# wecom-agent-relay 故障排查
+
+症状 → 原因 → 处理。
+
+## 哨兵 / 拉取
+
+### `401 token 无效`
+- `client/config.json` 的 `api_token` 与 server `.env` 的 `API_TOKEN` 不一致，或环境变量覆盖了错误值
+- 检查优先级：环境变量 `WECOM_API_TOKEN` > config.json
+
+### `sentinel --once` 一直 HTTP 5xx / 超时
+- 网关进程挂了：VPS 上 `systemctl status wecom-bot`，`journalctl -u wecom-bot -n 50`
+- 反代没配好：直接 curl `https://域名/health`（带 Bearer）看是否 200
+- HTTPS 证书过期
+
+### `/health` 返回 `connected: false`
+- VPS 无法出网到 `wss://openws.work.weixin.qq.com`
+- Bot ID / Secret 错误（`journalctl` 里看订阅失败原因）
+- Secret 被重置过：企微后台重新生成后更新 `.env` 并重启服务
+
+### 哨兵从未唤醒过 agent
+1. 确认哨兵以**后台任务**方式挂起（不是普通前台命令跑一下就结束）
+2. 确认 agent 框架开启了「后台任务完成通知」（WorkBuddy 默认开启）
+3. 手动 `node client/sentinel.mjs --status` 看本地 last_seen 与服务端 seq：
+   若 last_seen ≥ 服务端 seq，说明没有新消息（哨兵无错，等消息即可）
+4. 若 last_seen 被误推进（比如有人跑过 `--once`/`--status` 之外又手动改了游标），
+   可删 `client/sentinel_cursor.json` 重挂哨兵（会以当前服务端 seq 重新起步）
+
+### 同一批消息反复唤醒 / 漏消息
+- last_seen 只在「发现新消息」与「初始化」时写盘；手动删除游标文件会导致重复消费一批
+- 服务端游标（/ack）与哨兵游标（client/sentinel_cursor.json）是两套：
+  处理闭环必须做 `--ack`，否则重挂哨兵后 `--once`/对账会出现「已处理但未确认」的假象
+
+## 回复 / 推送
+
+### `--reply` 报「找不到 response_url」
+- 该消息超过 1 小时或已被消费过（response_url 一次性）
+- 解决：改用 `--send <chatid>` 主动推送（单聊 chatid 填 userid，群聊填群 chatid）
+
+### `--reply` HTTP 200 但 `errcode=60140`
+- response_url 已过期（1 小时）或已使用过——同上，改走 `--send`
+
+### 回复发出但企微没收到、HTTP 200
+- 用了 `text` 格式：企微只认 `markdown` / `template_card`，text 会被拒
+- 只看 HTTP 状态码不看 body：必须校验 `errcode == 0`（poll.mjs 已内置校验）
+
+### `--send` 报失败但确实想确认
+- 企微拒绝时返回 200 且 `ok:false`，errcode 在 `resp` 里；按 errcode 查企微文档
+- 频率限制：单会话 30 条/分钟、1000 条/小时
+- msgtype 只有 `markdown`/`template_card`/`file`/`image`/`voice`/`video`，没有 `text`
+
+## 部署
+
+### 网关频繁掉线重连
+- 两处跑了这个网关（新连接踢旧连接）：`systemctl status wecom-bot` 只留一处
+- VPS 出网被防火墙拦 wss
+
+### 收不到群消息
+- 群聊只有 **@机器人** 才推送；检查消息是否真的 @ 了机器人
+- 机器人必须已在群里
+
+### 部署后 `/health` 401
+- 反代没透传 Authorization 头（nginx 默认会透传，检查自定义配置）
+- API_TOKEN 前后有空格/引号
+
+## agent 闭环
+
+### agent 处理完忘了重挂哨兵
+- 症状：之后的消息没人响应，但 VPS 的 messages.jsonl 在涨
+- 处理：重新挂起哨兵即可，消息会从哨兵游标继续发现；已处理确认靠服务端 /ack 游标

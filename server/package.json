@@ -1,0 +1,13 @@
+{
+  "name": "wecom-agent-relay",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node --env-file=.env index.mjs",
+    "test": "node test_mock.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
