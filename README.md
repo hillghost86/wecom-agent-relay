@@ -1,7 +1,7 @@
 # wecom-agent-relay
 
 把**企业微信智能机器人**的消息变成 **AI agent 的事件**：VPS 长连接收消息落盘，
-本地哨兵发现新消息即「退出唤醒」对话式 agent —— 秒级响应、消息不丢、
+本地哨兵发现新消息即「退出唤醒」对话式 agent —— 秒级响应、哨兵离线也不丢消息、
 不耗 agent 平台积分。
 
 **无需公网 IP、无需域名备案、无需加解密**（用的是企微智能机器人的 WebSocket 长连接 API 模式）。
@@ -88,8 +88,8 @@ cp client/config.example.json client/config.json
 ### 4. 验证
 
 ```bash
-node client/poll.mjs --health      # connected: true 即网关已连上企微
-node client/sentinel.mjs --once    # NO_MSG 即正常
+node client/poll.mjs --health      # subscribed: true 即网关已订阅企微（connected 只代表 WS 已建立）
+node client/sentinel.mjs --once    # NO_MSG 或 NEW_MSG 都正常；有未 ack 的积压会立刻 NEW_MSG
 ```
 
 ### 5. 挂哨兵
@@ -110,7 +110,8 @@ node client/sentinel.mjs --interval 10
 
 > 把 `node client/sentinel.mjs` 用后台任务挂起，它退出时你会被自动唤醒；
 > 唤醒后从输出里的 seq 范围用 `GET /messages/<seq>` 取消息，
-> 按内容处理，用 `response_url` 回复，然后 `--ack` 推进游标，最后重挂哨兵。
+> 按内容处理，用 `response_url` 回复（格式见 [server/README.md](server/README.md#通过-response_url-回复)），
+> 然后 `--ack` 推进游标，最后重挂哨兵。
 
 之后即可在企微里 @机器人 下指令（记账、查询、提醒……），agent 秒级响应，
 全程无需打开 agent 界面。**关键约定：agent 每次处理完必须重挂哨兵**，
@@ -121,7 +122,7 @@ node client/sentinel.mjs --interval 10
 哨兵发现新消息时可执行任意命令（webhook、脚本、通知……），执行完照常退出：
 
 ```bash
-node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d @- <<< 'new message'"
+node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_message"   # 只取一个参数，整体加引号
 ```
 
 ### stdout 契约
@@ -136,9 +137,9 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d @- <<< 'ne
 | 接口 | 作用 |
 |---|---|
 | `GET /health` | 连接状态、最新 seq、游标 |
-| `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息（limit 上限 500） |
+| `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息；不带 after 时从已确认游标起；limit 上限 500 |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
-| `GET /ack?seq=<seq>` | 游标推进到 seq |
+| `GET /ack?seq=<seq>` | 游标推进到 seq（超过最大 seq 会钳到当前 seq） |
 | `POST /send` | 主动推送。msgtype 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`（**没有 text**）；`chatid` 单聊填 userid、群聊填群 chatid |
 
 ## 踩坑记录（给后来者）

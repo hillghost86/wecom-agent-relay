@@ -44,6 +44,9 @@
 - 用了 `text` 格式：企微只认 `markdown` / `template_card`，text 会被拒
 - 只看 HTTP 状态码不看 body：必须校验 `errcode == 0`（poll.mjs 已内置校验）
 
+### `--send` 返回 `ok:false` 且 `error` 是 `not subscribed` / `connection closed`
+- 网关正在重连，帧没发出去；等几秒再试，或看 `/health` 的 `subscribed`
+
 ### `--send` 报失败但确实想确认
 - 企微拒绝时返回 200 且 `ok:false`，errcode 在 `resp` 里；按 errcode 查企微文档
 - 频率限制：单会话 30 条/分钟、1000 条/小时
@@ -52,7 +55,7 @@
 ## 部署
 
 ### 网关频繁掉线重连
-- 两处跑了这个网关（新连接踢旧连接）：`systemctl status wecom-bot` 只留一处
+- 两处跑了这个网关（新连接踢旧连接）：`systemctl status wecom-bot` 只留一处。被踢时 `messages.jsonl` 里会多一条 `kind=event`、`eventtype=disconnected_event` 的记录，看到它就是这个原因
 - VPS 出网被防火墙拦 wss
 
 ### 收不到群消息

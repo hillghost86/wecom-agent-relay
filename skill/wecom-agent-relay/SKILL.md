@@ -45,7 +45,7 @@ cp client/config.example.json client/config.json
 
 1. 上传 `server/`（index.mjs、package.json、.env.example、wecom-bot.service）到 VPS `/opt/wecom-bot`
 2. `.env` 写入 `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`API_TOKEN`（`openssl rand -hex 32` 生成）；可选 `ADMIN_USERID` 收断线自报
-3. `npm i && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」
+3. `npm i`，装 systemd 单元：`sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」
 4. nginx/Caddy 把域名反代到 `http://127.0.0.1:8788` 并配 HTTPS
 
 如用户提供 SSH 访问方式并明确授权，可代为执行以上命令；否则给出命令清单由用户自行执行。
@@ -73,7 +73,7 @@ node client/sentinel.mjs --once    # 期望输出 NO_MSG（或 NEW_MSG）
 ### 第 6 步：日常使用与维护约定
 
 - WorkBuddy 关闭/电脑关机期间消息在 VPS 攒着，不丢；下次会话用户说一句话即可补挂哨兵并补处理积压
-- 每次会话开始时检查哨兵是否在挂（心跳文件/任务列表），未挂则补挂
+- 每次会话开始时检查哨兵是否在挂（后台任务列表），未挂则补挂
 - 处理消息时：有歧义（金额、客户名对不上）在群里追问，不要猜着办
 
 ## 参考

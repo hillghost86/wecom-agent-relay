@@ -30,6 +30,8 @@ journalctl -u wecom-bot -f
 用 nginx、Caddy 或宝塔把域名反代到 `http://127.0.0.1:8788` 并开 HTTPS，证书交给反代管。
 一个机器人同时只能有一条连接，别在两台机器上同时跑。
 
+如果 VPS 上的 node 是 nvm 装的，systemd 找不到它：把 `wecom-bot.service` 的 `ExecStart` 改成 `which node` 给出的绝对路径。
+
 ## agent 接口
 
 请求头带 `Authorization: Bearer <API_TOKEN>`。
@@ -39,8 +41,8 @@ journalctl -u wecom-bot -f
 | `GET /health` | 连接状态、最新 seq、游标 |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq 大于 after 的消息；不带 after 时从游标起；`limit` 默认 50、最多 500，一次一条就传 `limit=1` |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
-| `GET /ack?seq=<seq>` | 游标推进到 seq |
-| `POST /send` | 透传 `aibot_send_msg` 主动推送（response_url 过期后才用）。`msgtype` 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`，**没有 `text`**；`chatid` 单聊填 userid、群聊填群 chatid；`chat_type` 1=单聊 2=群聊，不填自动兼容。企微拒绝时返回 200 且 `ok:false`，errcode 在 `resp` 里 |
+| `GET /ack?seq=<seq>` | 游标推进到 seq；超过当前最大 seq 会钳到最大 seq，防止误传大数把后续消息全跳过 |
+| `POST /send` | 透传 `aibot_send_msg` 主动推送（response_url 过期后才用）。`msgtype` 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`，**没有 `text`**；`chatid` 单聊填 userid、群聊填群 chatid；`chat_type` 1=单聊 2=群聊，不填自动兼容。企微拒绝时返回 200 且 `ok:false`，errcode 在 `resp` 里；网关未订阅、等回执超时也返回 200 且 `ok:false`，原因在 `error` 里。不返回 5xx，因为反代/Cloudflare 会用自己的错误页覆盖响应体 |
 
 标准循环：
 
@@ -89,7 +91,7 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 
 - `messages.jsonl` 每行一条，带递增 `seq`，`body` 是企微原始消息体；游标存在 `messages.jsonl.state.json`。
 - 单聊消息只有 `from.userid`，群聊才有 `chatid`。
-- 心跳 30 秒，断线指数退避重连，凭证错误退避 60 秒，重复 `msgid` 忽略。
+- 心跳 30 秒，断线指数退避重连，凭证错误退避 60 秒。重复 `msgid`（企微重推）仍回「已收到」帧但不再落盘。
 - **断线期间的消息企微不补发，直接丢，且用户端显示发送成功**（2026-09-22 实测：停服务 → 发消息 → 启服务，日志无该消息）。所以连接在线率就是消息可靠性，重启服务尽量挑没人用的时候。
 - **断线自报**：`.env` 里填 `ADMIN_USERID=<你的 userid>` 后，每次重连成功进程会给这个人推一条离线时段（起止时间、秒数、原因是连接中断还是进程重启），提醒期间的消息要重发。进程重启的空窗靠心跳每 30 秒写一次的 `messages.jsonl.alive` 文件推算，所以 VPS 宕机也能报出来。3 秒以内不报，抖动时每分钟最多报一次。
 - 收到消息后 5 秒内自动回「已收到」（`REPLY_TEXT`，留空则不回），和 agent 之后的 `response_url` 回复互不影响。

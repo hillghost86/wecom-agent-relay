@@ -60,7 +60,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 
 1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 `server/.env`、`client/config.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
 2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`.env` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
-3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 至少用 `--health` / `--status` 做一次只读验证。跑不了要明说。
+3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再用 `--health` / `--status` 对真网关做一次只读验证。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
 5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` + `systemctl restart` 命令，并提醒重启会丢那几秒的消息。
 6. **不覆盖用户未提交的改动**：`git status` / `git diff` 先看；禁止 `git checkout -- <路径>`、`git restore`、`git reset --hard`、`git clean -f`、未经同意的 `git stash`。要看历史版本用 `git show <ref>:<path>`。
