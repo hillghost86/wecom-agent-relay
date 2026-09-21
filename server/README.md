@@ -97,7 +97,7 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 ## 自测
 
 ```bash
-node test_mock.mjs     # 起假网关，16 项断言
+node test_mock.mjs     # 起假网关，28 项断言（含 client/ 两个脚本）
 ```
 
 ## 文件

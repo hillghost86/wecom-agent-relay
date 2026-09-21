@@ -78,8 +78,10 @@ if (args.includes('--get')) {
   process.exit(0);
 }
 
-if (args.includes('--ack')) {
-  const seq = args[args.indexOf('--ack') + 1];
+// --ack <seq> 显式推进；--ack 不带数字则落到下面的「拉取后按最大 seq 确认」
+const ackIdx = args.indexOf('--ack');
+if (ackIdx >= 0 && /^\d+$/.test(args[ackIdx + 1] ?? '')) {
+  const seq = args[ackIdx + 1];
   const r = await api(`/ack?seq=${seq}`);
   console.log(r.status === 200 ? `游标已推进到 ${seq}` : `失败 ${r.status}: ${JSON.stringify(r.body)}`);
   process.exit(r.status === 200 ? 0 : 1);

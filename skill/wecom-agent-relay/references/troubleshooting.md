@@ -24,7 +24,7 @@
 3. 手动 `node client/sentinel.mjs --status` 看本地 last_seen 与服务端 seq：
    若 last_seen ≥ 服务端 seq，说明没有新消息（哨兵无错，等消息即可）
 4. 若 last_seen 被误推进（比如有人跑过 `--once`/`--status` 之外又手动改了游标），
-   可删 `client/sentinel_cursor.json` 重挂哨兵（会以当前服务端 seq 重新起步）
+   可删 `client/sentinel_cursor.json` 重挂哨兵（会以服务端已确认游标重新起步，有未 ack 的积压会立刻唤醒一次）
 
 ### 同一批消息反复唤醒 / 漏消息
 - last_seen 只在「发现新消息」与「初始化」时写盘；手动删除游标文件会导致重复消费一批

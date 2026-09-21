@@ -3,10 +3,11 @@
  *   1. 订阅帧带正确 bot_id/secret，并处理 errcode=0 回包
  *   2. 心跳 ping 定期到达
  *   3. 推 aibot_msg_callback 后，5 秒内收到同 req_id 的 aibot_respond_msg（finish=true）
- *   4. 重复 msgid 不再回复
+ *   4. 重复 msgid 仍回帧但不落盘
  *   5. 服务端断开后客户端自动重连并重新订阅
  *   6. 消息落盘到 JSONL
  *   7. HTTP API：/health、/messages、/ack 游标、鉴权、/send 透传
+ *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -41,6 +42,8 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({ headers: { req_id: f.headers.req_id }, errcode: ok ? 0 : 40001, errmsg: ok ? 'ok' : 'invalid secret' }));
     } else if (f.cmd === 'ping') {
       ws.send(JSON.stringify({ headers: { req_id: f.headers.req_id }, errcode: 0, errmsg: 'ok' }));
+    } else if (f.cmd === 'aibot_send_msg' && f.body?.chatid === 'NOACK') {
+      ws.close(1001, 'noack'); // 让 pending 被拒绝，模拟发出后连接断开
     } else if (f.cmd === 'aibot_send_msg' && f.body?.msgtype === 'text') {
       ws.send(JSON.stringify({ headers: { req_id: f.headers.req_id }, errcode: 40008, errmsg: 'invalid msgtype' }));
     } else if (f.cmd === 'aibot_respond_msg' || f.cmd === 'aibot_send_msg') {
@@ -89,7 +92,8 @@ try {
   // 4. 重复 msgid
   conns[0].ws.send(JSON.stringify({ ...msg, headers: { req_id: 'REQ-MSG-1-DUP' } }));
   await sleep(300);
-  check(conns[0].frames.filter((f) => f.cmd === 'aibot_respond_msg').length === 1, '重复 msgid 不再回复');
+  const dupResp = conns[0].frames.find((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-1-DUP');
+  check(!!dupResp && dupResp.body.stream.finish === true, '重复 msgid 仍用新 req_id 回帧（企微重推需要回应）');
 
   // 5. 服务端断开 → 重连 + 重新订阅
   conns[0].ws.close(1001, 'kicked');
@@ -104,7 +108,9 @@ try {
 
   // 6. 落盘
   const lines = fs.readFileSync(tmpLog, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
-  check(lines.length === 2 && lines[0].body.msgid === 'MSG1' && lines[1].body.msgid === 'MSG2' && lines[0].seq === 1 && lines[1].seq === 2, '消息落盘 JSONL（带 seq）', `${lines.length} 条`);
+  check(lines.length === 2 && lines[0].body.msgid === 'MSG1' && lines[1].body.msgid === 'MSG2' && lines[0].seq === 1 && lines[1].seq === 2, '消息落盘 JSONL（带 seq，重复消息未落盘）', `${lines.length} 条`);
+  check(!childOut.includes('https://qyapi.weixin.qq.com/cgi-bin/aibot/response') && lines[0].body.response_url.includes('response_code=RC1'),
+    '日志里 response_url 只留尾部，落盘保留完整');
 
   // 7. HTTP API
   const base = `http://127.0.0.1:${httpPort}`;
@@ -136,6 +142,11 @@ try {
   check(m3.body.after === 1 && m3.body.messages.length === 1 && m3.body.messages[0].seq === 2, '/ack 后 /messages 默认从游标起');
   const stateFile = JSON.parse(fs.readFileSync(tmpLog + '.state.json', 'utf-8'));
   check(stateFile.cursor === 1, '游标持久化到 .state.json');
+  const badAfter = await j('/messages?after=abc');
+  const badLimit = await j('/messages?limit=all');
+  check(badAfter.status === 400 && badLimit.status === 400, 'GET /messages 的 after/limit 非数字返回 400');
+  const clamp = await j('/ack?seq=999999');
+  check(clamp.body.cursor === 2, 'GET /ack 超过最大 seq 时钳到当前 seq', `cursor=${clamp.body.cursor}`);
 
   const sendBody = { chatid: 'CHAT1', chat_type: 1, msgtype: 'markdown', markdown: { content: '**主动推送**' } };
   const sd = await j('/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sendBody) });
@@ -144,6 +155,32 @@ try {
     'POST /send 透传为 aibot_send_msg 并返回回执');
   const bad = await j('/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatid: 'u1', chat_type: 1, msgtype: 'text', text: { content: 'x' } }) });
   check(bad.status === 200 && bad.body.ok === false && bad.body.resp.errcode === 40008, 'POST /send 被企微拒绝时返回 200 + ok:false 并带回 errcode（不返回 5xx）', JSON.stringify(bad.body.resp));
+
+  // 8. client/ 脚本：复制到临时目录跑，避免在仓库里生成 sentinel_cursor.json
+  const { execFileSync } = await import('node:child_process');
+  const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-client-'));
+  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(cdir, f));
+  const runClient = (script, ...a) => {
+    try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: API_TOKEN }, encoding: 'utf-8', timeout: 10000 }); }
+    catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
+  };
+  // 服务端此时 cursor=2、seq=2；再推一条形成积压（seq=3 > cursor）
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: 'REQ-MSG-3' }, body: { msgid: 'MSG3', chattype: 'single', from: { userid: 'u3' }, msgtype: 'text', text: { content: 'backlog' } } }));
+  await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-3'));
+  const s1 = runClient('sentinel.mjs', '--once');
+  check(/NEW_MSG count=1 seq=3-3/.test(s1), 'sentinel 首次运行以游标起步，积压立刻触发 NEW_MSG', s1.trim().split('\n').pop());
+  const p1 = runClient('poll.mjs', '--ack');
+  const h2 = await j('/health');
+  check(/已 ack 到 seq=3/.test(p1) && h2.body.cursor === 3, 'poll.mjs --ack 不带 seq：拉取后按最大 seq 确认', `cursor=${h2.body.cursor}`);
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: 'REQ-MSG-4' }, body: { msgid: 'MSG4', chattype: 'single', from: { userid: 'u4' }, msgtype: 'text', text: { content: 'exec' } } }));
+  await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-4'));
+  const s2 = runClient('sentinel.mjs', '--once', '--exec', 'echo EXEC_RAN', '--interval', '5');
+  check(/^EXEC_RAN$/m.test(s2) && !/EXEC_RAN 5/.test(s2) && /NEW_MSG count=1 seq=4-4/.test(s2), 'sentinel --exec 只取紧跟的一个参数，后续 --interval 不混入命令');
+  fs.rmSync(cdir, { recursive: true, force: true });
+
+  // /send 发出后连接断开：预期失败也返回 200 + ok:false + error（放最后，因为会触发重连）
+  const noack = await j('/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatid: 'NOACK', msgtype: 'markdown', markdown: { content: 'x' } }) });
+  check(noack.status === 200 && noack.body.ok === false && /connection closed/.test(noack.body.error || ''), 'POST /send 未拿到回执（连接断开）时返回 200 + ok:false + error，不返回 5xx', JSON.stringify(noack.body));
 } catch (e) {
   check(false, '异常: ' + e.message);
   console.log('--- 客户端输出 ---\n' + childOut);

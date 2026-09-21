@@ -146,7 +146,8 @@ class MessageStore {
     return out;
   }
   ack(seq) {
-    this.cursor = Math.max(this.cursor, seq);
+    // 钳到当前最大 seq：误传大数会让之后的消息全部落在游标之下被跳过
+    this.cursor = Math.max(this.cursor, Math.min(seq, this.seq));
     if (this.stateFile) {
       try { fs.writeFileSync(this.stateFile, JSON.stringify({ cursor: this.cursor })); } catch (e) { warn('写游标失败:', e.message); }
     }
@@ -167,6 +168,8 @@ function readAlive() {
   try { const t = Number(fs.readFileSync(aliveFile, 'utf-8')); return Number.isFinite(t) && t > 0 ? t : null; } catch { return null; }
 }
 const fmtTime = (ms) => new Date(ms).toLocaleString('zh-CN', { timeZone: cfg.tz, hour12: false });
+// 日志里的 response_url 只留尾部：它是一次性的回复凭证，进了 journal 就等于泄露
+const maskBody = (b) => (b && b.response_url ? { ...b, response_url: '…' + String(b.response_url).slice(-8) } : b);
 
 /* ---------- 去重（企微可能重推） ---------- */
 const seenMsgIds = new Set();
@@ -365,7 +368,7 @@ class BotConnection {
       case 'aibot_msg_callback':
         return this.onMsgCallback(frame);
       case 'aibot_event_callback':
-        log('【事件】', JSON.stringify(frame.body));
+        log('【事件】', JSON.stringify(maskBody(frame.body)));
         appendMsgLog({ kind: 'event', req_id: reqId, body: frame.body });
         return;
       default:
@@ -376,15 +379,16 @@ class BotConnection {
   onMsgCallback(frame) {
     const b = frame.body || {};
     const reqId = frame.headers?.req_id;
+    // 企微重推（同 msgid、新 req_id）多半是上次没在 5 秒内收到回帧：不再落盘，但这次一定要回帧
     if (isDuplicate(b.msgid)) {
-      log('重复消息，忽略', b.msgid);
-      return;
+      log('重复消息，只回帧不落盘', b.msgid);
+    } else {
+      this.lastMsgAt = new Date().toISOString();
+      log('【收到消息】', JSON.stringify(maskBody(b)));
+      log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
+      if (b.msgtype === 'text') log('  文本=', b.text?.content);
+      appendMsgLog({ kind: 'message', req_id: reqId, body: b });
     }
-    this.lastMsgAt = new Date().toISOString();
-    log('【收到消息】', JSON.stringify(b));
-    log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
-    if (b.msgtype === 'text') log('  文本=', b.text?.content);
-    appendMsgLog({ kind: 'message', req_id: reqId, body: b });
 
     // 5 秒内必须回一帧；用同一个 req_id
     if (cfg.replyText) {
@@ -459,8 +463,12 @@ function startHttpServer(conn) {
         });
       }
       if (req.method === 'GET' && url.pathname === '/messages') {
-        const after = url.searchParams.has('after') ? Number(url.searchParams.get('after')) : store.cursor;
-        const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 50), 1), 500);
+        const afterRaw = url.searchParams.get('after'), limitRaw = url.searchParams.get('limit');
+        if ((afterRaw !== null && !/^\d+$/.test(afterRaw)) || (limitRaw !== null && !/^\d+$/.test(limitRaw))) {
+          return json(res, 400, { ok: false, error: 'after/limit must be non-negative integers' });
+        }
+        const after = afterRaw !== null ? Number(afterRaw) : store.cursor;
+        const limit = Math.min(Math.max(Number(limitRaw || 50), 1), 500);
         const kind = url.searchParams.get('kind') || '';
         const messages = store.list({ after, limit, kind });
         return json(res, 200, { ok: true, after, cursor: store.cursor, seq: store.seq, messages, next: messages.length ? messages[messages.length - 1].seq : after });
@@ -478,8 +486,14 @@ function startHttpServer(conn) {
       if (req.method === 'POST' && url.pathname === '/send') {
         let body;
         try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
-        const resp = await conn.sendFrame({ cmd: 'aibot_send_msg', body });
-        // 企微拒绝也返回 200：反代/Cloudflare 会把 5xx 换成自己的错误页，吞掉 errcode
+        // 企微拒绝、未订阅、等回执超时都返回 200：反代/Cloudflare 会把 5xx 换成自己的错误页，吞掉原因
+        let resp;
+        try {
+          resp = await conn.sendFrame({ cmd: 'aibot_send_msg', body });
+        } catch (e) {
+          warn(`/send 未能发出：${e.message}`);
+          return json(res, 200, { ok: false, error: e.message });
+        }
         if (resp.errcode !== 0) warn(`/send 被企微拒绝 errcode=${resp.errcode} errmsg=${resp.errmsg} body=${JSON.stringify(body).slice(0, 300)}`);
         return json(res, 200, { ok: resp.errcode === 0, resp });
       }

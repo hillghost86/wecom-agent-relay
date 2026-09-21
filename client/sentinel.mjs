@@ -9,8 +9,8 @@
  *   node client/sentinel.mjs --interval 5        自定义轮询间隔（秒）
  *   node client/sentinel.mjs --once              只查一次就退出（验证用）
  *   node client/sentinel.mjs --status            打印本地/服务端 seq 后退出
- *   node client/sentinel.mjs --exec <command>    发现新消息时先执行外部命令再退出
- *                                         （可用于 webhook 通知、调用其他脚本等）
+ *   node client/sentinel.mjs --exec "<command>"  发现新消息时先执行外部命令再退出
+ *                                         （只取紧跟的一个参数，命令含空格请整体加引号）
  *   node client/sentinel.mjs --help              帮助
  *
  * stdout 契约（供 agent / 自动化脚本解析）：
@@ -22,7 +22,8 @@
  *   或同目录 config.json: { "api_base": "...", "api_token": "..." }
  *
  * 游标：sentinel_cursor.json 记录已见过的最大 seq（与服务端 ack 游标无关），
- *       同一批消息只触发一次退出；首次运行以服务端最新 seq 起步，不回放历史。
+ *       同一批消息只触发一次退出；首次运行以服务端已确认游标起步，
+ *       所以有未处理的积压会立刻触发一次唤醒。
  *
  * 可靠性设计：
  * - 长跑型：网络错误、无消息都不退出（退出 = 唤醒 agent = 消耗一轮对话，
@@ -51,7 +52,7 @@ const getArg = (name, dft) => { const i = args.indexOf(name); return i >= 0 ? Nu
 const INTERVAL_S = getArg('--interval', 10);
 const ONCE = args.includes('--once');
 const execIdx = args.indexOf('--exec');
-const EXEC_CMD = execIdx >= 0 ? args.slice(execIdx + 1).filter(a => !a.startsWith('--')).join(' ') : '';
+const EXEC_CMD = execIdx >= 0 ? (args[execIdx + 1] || '') : '';
 
 const fileCfg = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) : {};
 const BASE = String(process.env.WECOM_API_BASE || fileCfg.api_base || '').replace(/\/+$/, '');
@@ -79,9 +80,10 @@ async function probe() {
 async function loop() {
   if (lastSeen === null) {
     const h = await probe();
-    lastSeen = h.seq;
+    // 以已确认游标起步：服务端有积压未处理时，第一轮就该唤醒 agent，而不是等下一条新消息
+    lastSeen = h.cursor;
     fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: lastSeen }));
-    console.log(`[${ts()}] 哨兵启动：interval=${INTERVAL_S}s，last_seen 初始化为 ${lastSeen}（不回放历史）`);
+    console.log(`[${ts()}] 哨兵启动：interval=${INTERVAL_S}s，last_seen 初始化为服务端游标 ${lastSeen}`);
   }
 
   while (true) {
