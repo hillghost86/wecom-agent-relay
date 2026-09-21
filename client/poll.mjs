@@ -42,9 +42,6 @@ function usage() {
 }
 
 const args = process.argv.slice(2);
-if (args.includes('--help') || args.includes('-h') || args.length === 0 && process.argv[2] === undefined) {
-  // 允许无参（默认拉取），只在 --help 时显示
-}
 if (args.includes('--help') || args.includes('-h')) { usage(); process.exit(0); }
 
 async function api(p, opts = {}) {
@@ -152,8 +149,8 @@ if (r.status !== 200) {
   process.exit(1);
 }
 
-const msgs = r.body.messages || r.body.data || [];
-console.log(`服务端游标: ${r.body.cursor ?? r.body.state?.last_seq ?? '?'}，本次拉到 ${msgs.length} 条（after=${after}）`);
+const msgs = r.body.messages || [];
+console.log(`服务端游标: ${r.body.cursor}，本次拉到 ${msgs.length} 条（after=${after}）`);
 
 let maxSeq = Number(after);
 for (const m of msgs) {
@@ -161,7 +158,8 @@ for (const m of msgs) {
   const isGroup = !!b.chatid;
   const who = b.from?.userid || '?';
   const content = b.text?.content || JSON.stringify(b.text || b.voice || b.image || {});
-  const when = b.send_time ? new Date(Number(b.send_time) * 1000).toLocaleString('zh-CN') : m.ts || '';
+  // 企微消息体不带时间，用网关收到的时刻
+  const when = m.received_at ? new Date(m.received_at).toLocaleString('zh-CN', { hour12: false }) : '';
   console.log(`\n[seq=${m.seq}] ${isGroup ? '群聊 ' + b.chatid : '单聊'} 来自 ${who} @ ${when}`);
   console.log(`  内容: ${content}`);
   if (b.response_url) console.log(`  response_url: 可回复（1小时内）`);
