@@ -32,7 +32,7 @@ VPS 网关 7×24 长连接企微并落盘（企微会静默丢弃机器人离线
 ### 第 2 步：克隆仓库并配置 client
 
 ```bash
-git clone <仓库地址> wecom-agent-relay && cd wecom-agent-relay
+git clone https://github.com/hillghost86/wecom-agent-relay.git && cd wecom-agent-relay
 cp client/config.example.json client/config.json
 ```
 

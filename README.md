@@ -53,7 +53,7 @@ VPS 网关 server/（7×24 在线，唯一持久层 messages.jsonl）
 
 ```bash
 # 方式 A：clone 后复制技能目录
-git clone <本仓库> && mkdir -p ~/.workbuddy/skills
+git clone https://github.com/hillghost86/wecom-agent-relay.git && mkdir -p ~/.workbuddy/skills
 cp -r wecom-agent-relay/skill/wecom-agent-relay ~/.workbuddy/skills/
 
 # 方式 B：直接下载发布包里的 wecom-agent-relay.zip，解压到 ~/.workbuddy/skills/
