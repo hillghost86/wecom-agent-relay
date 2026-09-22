@@ -176,7 +176,7 @@ try {
   const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-client-'));
   for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(cdir, f));
   const runClient = (script, ...a) => {
-    try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: API_TOKEN }, encoding: 'utf-8', timeout: 10000 }); }
+    try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: API_TOKEN, WECOM_AGENT_ID: 'test-agent' }, encoding: 'utf-8', timeout: 10000 }); }
     catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
   };
   // 服务端此时 cursor=2、seq=2；再推一条形成积压（seq=3 > cursor）

@@ -7,9 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/wecom-bot
-EnvironmentFile=/opt/wecom-bot/.env
 # nvm 装的 node 不在 systemd 的 PATH 里，那种情况把下面改成 `which node` 的绝对路径
-ExecStart=/usr/bin/env node index.mjs
+ExecStart=/usr/bin/env node index.mjs --config /opt/wecom-bot/config.json
 Restart=always
 RestartSec=5
 # 让 node 的 stdout 进 journal

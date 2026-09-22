@@ -5,7 +5,33 @@
 
 ## 未发布
 
-（暂无）
+### 变更
+- **服务端配置从环境变量迁到 `config.json`**（结构见 `server/config.example.json`：顶层 `http` / `tz` / `agent_online_secs`，机器人放在 `bots` 列表，本版本只允许一个）。
+  启动方式变为 `node index.mjs --config /opt/wecom-bot/config.json`，不给 `--config` 时读工作目录下的 `config.json`；`server/.env.example` 已删除，
+  `wecom-bot.service` 去掉 `EnvironmentFile=`、`ExecStart` 带上 `--config`。
+  **迁移步骤**：把原 `.env` 里的值填进 `config.json`（`WECOM_BOT_ID`→`bots[0].bot_id`、`WECOM_BOT_SECRET`→`bots[0].secret`、`API_TOKEN`→`http.api_token`、
+  `ADMIN_USERID`→`bots[0].admin_userid`、`REPLY_TEXT`→`bots[0].reply_text`、`MSG_LOG`→`bots[0].msg_log`、`HTTP_HOST`/`HTTP_PORT`→`http.host`/`http.port`），
+  `chmod 600 config.json`，再把 systemd 单元的 `ExecStart` 加上 `--config`。
+  兼容期：没有 `config.json` 但有 `WECOM_BOT_ID` / `WECOM_BOT_SECRET` 环境变量时仍能启动并打一条迁移警告，**下个版本移除**。
+- **stdout 契约变更**：`client/sentinel.mjs` 的 `NEW_MSG` 行末尾多一段 `agent=<agent_id>`，
+  完整格式为 `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>`（`NO_MSG` 不变）。按前缀或 seq 解析的脚本不受影响，整行精确匹配的要改。
+
+### 新增
+- **处理端在线状态（presence）**：HTTP 请求带 `X-Relay-Agent: <agent_id>` 头即视为处理端露面，`/ack` 记为处理端在干活；
+  `agent_online_secs`（默认 300 秒）内有露面或 ack 就算在线，进程启动后还没见过任何 agent 时为「未知」并按在线处理。
+- **自动回复分档**：处理端离线时，给企微的秒回文案换成 `reply_text_offline`（默认「已收到。处理端已离线 {duration}，上线后会处理」，`{duration}` 替换为实际离线时长）。
+- `/health` 新增 `bot`、`agent_online`（true/false/null）、`agent_last_seen`、`last_agent`、`last_ack_at`、`pending`（未 ack 条数）；presence 与游标一起持久化。
+- **管理员离线告警** `offline_alert_mins`（默认 `0` = 关闭）：处理端离线超过这个分钟数且有积压时给 `admin_userid` 推一条，恢复后再推一条。
+  默认关，因为处理端所在的电脑每晚休眠就会每晚报一次。
+- `client/config.json` 新增可选项 `agent_id`（读取优先级：环境变量 `WECOM_AGENT_ID` > `config.json` 的 `agent_id` > 本机主机名）。
+  `poll.mjs` 的所有网关请求都带 `X-Relay-Agent`；`sentinel.mjs` 只在长跑循环里带，`--once` / `--status` 不带（它们常由人手工执行，不代表处理端在线）。
+- `client/sentinel.mjs --status` 输出补上 `处理端=<在线|离线|未知>(<last_agent>)`。
+- `test_mock.mjs` 从 28 项扩到 36 项，新增 presence、分档回复、离线告警、config.json 校验与环境变量兼容加载的断言。
+
+### 文档
+- README、`server/README.md`、SKILL.md、架构说明、排障手册、CLAUDE.md 同步配置迁移与 presence：
+  部署清单里 `.env` 全部换成 `config.json`（`chmod 600`），`/health` 字段表补齐，新增「为什么要知道处理端在不在」「处理端在线状态」两节，
+  排障手册新增「用户收到『处理端已离线』的回复」和「`/health` 的 `agent_online` 是 null」两条。
 
 ## v0.1.1 — 2026-09-22
 

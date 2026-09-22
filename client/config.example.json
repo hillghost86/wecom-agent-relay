@@ -1,4 +1,5 @@
 {
   "api_base": "https://your-domain.example.com",
-  "api_token": "replace-with-the-API_TOKEN-from-server-.env"
+  "api_token": "replace-with-the-api_token-from-server-config.json",
+  "agent_id": "my-agent"
 }

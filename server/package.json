@@ -4,7 +4,7 @@
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
-    "start": "node --env-file=.env index.mjs",
+    "start": "node index.mjs",
     "test": "node test_mock.mjs"
   },
   "dependencies": {

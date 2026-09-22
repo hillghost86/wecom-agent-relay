@@ -29,6 +29,10 @@ VPS 网关 server/（7×24 在线，唯一持久层 messages.jsonl）
   新消息照常落盘；agent 处理完重挂哨兵，从游标补拉，一条不丢。
 - **为什么不耗平台积分？** 轮询由本地哨兵进程承担（不经过 agent）；
   agent 只在「真有消息」时被唤醒，唤醒即干活，没有空转的定时任务。
+- **为什么要知道处理端在不在？** 哨兵和客户端每次请求都带 `X-Relay-Agent` 头，网关据此判断
+  「处理端（agent 那台机器）」是否还在。这样用户发消息时能拿到一句诚实的回复：在线回「已收到」，
+  离线回「已收到。处理端已离线 X 小时，上线后会处理」，而不是让人干等。管理员则能在 `/health` 里
+  一眼看到三层状态——企微连接在不在（`subscribed`）、处理端在不在（`agent_online`）、积压多少（`pending`）。
 
 ## 目录
 
@@ -75,14 +79,15 @@ cp -r wecom-agent-relay/skill/wecom-agent-relay ~/.workbuddy/skills/
 ### 2. 部署 VPS 网关
 
 见 [server/README.md](server/README.md)。核心：`server/index.mjs` 以 systemd 常驻，
-`WECOM_BOT_ID` / `WECOM_BOT_SECRET` / `API_TOKEN`（`openssl rand -hex 32` 自生成）写入 `.env`，
-`ADMIN_USERID` 填一个 userid 可收到断线自报。
+配置走 `config.json`（从 `server/config.example.json` 复制）：`bot_id` / `secret` /
+`http.api_token`（`openssl rand -hex 32` 自生成）必填，`admin_userid` 填一个 userid 可收到断线自报。
 
 ### 3. 配置本机客户端
 
 ```bash
 cp client/config.example.json client/config.json
-# api_base = 反代后的 HTTPS 地址；api_token = 服务端 .env 里的 API_TOKEN
+# api_base = 反代后的 HTTPS 地址；api_token = 服务端 config.json 里的 http.api_token
+# agent_id 可选，用来在网关侧标识这台处理端，不填默认用本机主机名
 ```
 
 ### 4. 验证
@@ -129,14 +134,14 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 
 | 输出 | 含义 |
 |---|---|
-| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor>` | 发现 n 条新消息（seq 闭区间） |
+| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），`agent` 是本机的处理端标识 |
 | `NO_MSG ...` | `--once` 模式下无新消息 |
 
-## HTTP API（VPS 网关，请求头 `Authorization: Bearer <API_TOKEN>`）
+## HTTP API（VPS 网关，请求头 `Authorization: Bearer <api_token>`；处理端另带 `X-Relay-Agent: <agent_id>` 报在线）
 
 | 接口 | 作用 |
 |---|---|
-| `GET /health` | 连接状态、最新 seq、游标 |
+| `GET /health` | 连接状态、最新 seq、游标，以及处理端在线状态（`agent_online` / `agent_last_seen` / `last_agent`）和积压数 `pending` |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息；不带 after 时从已确认游标起；limit 上限 500 |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
 | `GET /ack?seq=<seq>` | 游标推进到 seq（超过最大 seq 会钳到当前 seq） |
@@ -153,8 +158,8 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 
 ## 安全
 
-- `client/config.json` / `server/.env` / `*.jsonl` 游标与消息文件已在 `.gitignore`，绝不入库
-- `API_TOKEN` 与 `Secret` 泄露 = 任何人可读你的消息、冒充你的机器人，妥善保管
+- `client/config.json` / `server/config.json` / `*.jsonl` 游标与消息文件已在 `.gitignore`，绝不入库
+- `api_token` 与 `Secret` 泄露 = 任何人可读你的消息、冒充你的机器人，妥善保管
 - 本项目与腾讯官方无关，仅调用公开的企业微信智能机器人 API，请遵守企微开发者协议
 
 ## 更新记录

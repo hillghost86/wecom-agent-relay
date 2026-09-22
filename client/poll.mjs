@@ -13,8 +13,8 @@
  *   node client/poll.mjs --ack <seq>        # 推进服务端游标
  *
  * 配置（优先级：环境变量 > config.json）：
- *   WECOM_API_BASE / WECOM_API_TOKEN
- *   或同目录 config.json: { "api_base": "...", "api_token": "..." }
+ *   WECOM_API_BASE / WECOM_API_TOKEN / WECOM_AGENT_ID（可选，默认本机主机名）
+ *   或同目录 config.json: { "api_base": "...", "api_token": "...", "agent_id": "..." }
  *
  * 企微侧注意事项（踩过的坑）：
  * - response_url 在消息的 body.response_url（1 小时内有效、只能调一次，群聊自动引用原消息）
@@ -22,6 +22,7 @@
  * - /send 的字段是 chatid（单聊填 userid、群聊填群 chatid）；企微拒绝时返回 200 且 ok:false，errcode 在 resp 里
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,7 +36,9 @@ if (!BASE || !TOKEN) {
   console.error('缺少配置：设置环境变量 WECOM_API_BASE / WECOM_API_TOKEN，或在同目录 config.json 填 api_base / api_token');
   process.exit(1);
 }
-const H = { Authorization: `Bearer ${TOKEN}` };
+const AGENT_ID = String(process.env.WECOM_AGENT_ID || fileCfg.agent_id || os.hostname() || 'unknown');
+// 本脚本由 agent 执行，跑一次就等于处理端在干活；这个头让网关记下在线状态
+const H = { Authorization: `Bearer ${TOKEN}`, 'X-Relay-Agent': AGENT_ID };
 
 function usage() {
   console.log(fs.readFileSync(__filename, 'utf-8').split('*/')[0].replace(/^\/\*\*/, '').trim());

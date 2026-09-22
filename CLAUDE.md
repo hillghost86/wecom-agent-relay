@@ -24,8 +24,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 28 项断言（协议 + HTTP API + 断线自报 + client 脚本）
-node --env-file=.env index.mjs           # 本地跑一个真连接（注意：会踢掉 VPS 上的连接，只在用户同意时跑）
+node test_mock.mjs                       # 必做：起假网关跑 36 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载）
+node index.mjs                           # 本地跑一个真连接，读工作目录下的 config.json（注意：会踢掉 VPS 上的连接，只在用户同意时跑）
 
 # —— client/ ——（只读验证，需要 WECOM_API_BASE / WECOM_API_TOKEN 环境变量或 client/config.json）
 node client/poll.mjs --health            # 网关状态：subscribed:true 即在线
@@ -33,6 +33,7 @@ node client/sentinel.mjs --status        # 本地/服务端 seq 对照
 
 # —— 部署（由用户在 VPS 上执行，我没有 VPS 的 SSH）——
 scp server/index.mjs <vps>:/opt/wecom-bot/index.mjs
+scp server/config.json <vps>:/opt/wecom-bot/config.json   # 只在首次从 .env 迁移时；单元文件的 ExecStart 要带 --config
 sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 ```
 
@@ -47,6 +48,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 - agent 回复走消息自带的 `response_url`：1 小时内有效、只能调一次、`msgtype` 只认 `markdown`（`text` 会被拒）、HTTP 200 不代表成功要看 body 的 `errcode`、群聊自动引用原消息。和「已收到」互不影响，用户看到两条。
 - `/send` 主动推送同样没有 `text`；`chatid` 单聊填 userid、群聊填群 chatid；企微拒绝时返回 200 + `ok:false`，**不能返回 5xx**（Cloudflare 会用自己的错误页覆盖响应体，把 errcode 吞掉）。
 - 单聊消息没有 `chatid`，只有 `from.userid`。
+- 处理端（agent 那台机器）在线状态靠 HTTP 请求头 `X-Relay-Agent: <agent_id>` 判定，`/ack` 另算「在干活」；窗口是 `agent_online_secs`（默认 300 秒），没见过任何 agent 时为 `null`（未知）按在线处理。离线时给企微的自动回复换成带离线时长的 `reply_text_offline`；管理员离线告警 `offline_alert_mins` 默认 0（关），因为处理端所在电脑每晚休眠会每晚报一次。
 - Node 内置 WebSocket 在部分代理环境下对企微网关握手失败，固定用 `ws` 包。
 - 游标语义是「至少一次」：agent 处理完显式 `/ack`，服务端不自动推进；agent 侧按 `msgid` 幂等。
 - HTTP API 只监听 `127.0.0.1`，HTTPS / 域名 / 证书 / 对外端口全归反代（nginx / Caddy / 宝塔），进程不碰证书。
@@ -59,9 +61,9 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 
 ## ⛔ 硬规则（必须遵守）
 
-1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 `server/.env`、`client/config.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
-2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`.env` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
-3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再用 `--health` / `--status` 对真网关做一次只读验证。跑不了要明说。
+1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 `server/config.json`、`client/config.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
+2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`config.json` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
+3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再对真网关做一次只读验证。**只读验证用 `client/sentinel.mjs --status` 或不带 `X-Relay-Agent` 头的 curl**，不要用 `poll.mjs`：它带头会把这台机器记成处理端在线，污染线上 presence。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
 5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` + `systemctl restart` 命令，并提醒重启会丢那几秒的消息。
 6. **不覆盖用户未提交的改动**：`git status` / `git diff` 先看；禁止 `git checkout -- <路径>`、`git restore`、`git reset --hard`、`git clean -f`、未经同意的 `git stash`。要看历史版本用 `git show <ref>:<path>`。
@@ -72,10 +74,10 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 
 ## 代码规范
 
-- 纯 ESM `.mjs`，无构建步骤，无 TypeScript；配置全部走环境变量（`server/`）或 `config.json` / 环境变量（`client/`），启动时缺必填项直接报错退出。
+- 纯 ESM `.mjs`，无构建步骤，无 TypeScript；配置全部走 `config.json`（`server/` 的路径用 `--config` 指定，默认工作目录；`client/` 用同目录 config.json，环境变量可覆盖），启动时缺必填项直接报错退出。
 - 注释只写「为什么」不写「是什么」，用中文，一两行说清；协议坑点写在函数头注释里而不是散落各处。
 - 日志：`log` / `warn` 带 ISO 时间戳；不打印 Secret、token、完整 `response_url`（只打尾部几位）。
-- 文档同步：改接口、改 `.env` 项、发现新的协议事实，同一次改动里更新 `README.md`（总览）和 `server/README.md`（部署与接口），两份各管各的，别重复大段。
+- 文档同步：改接口、改 `config.json` 配置项、发现新的协议事实，同一次改动里更新 `README.md`（总览）和 `server/README.md`（部署与接口），两份各管各的，别重复大段。
 - 写代码风格对齐周边既有代码（命名、注释密度、惯用法）。
 
 ## 工作流

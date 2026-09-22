@@ -57,7 +57,7 @@ VPS 网关提供的是 HTTP API。理论上可在本机与 VPS 之间再建一�
 
 | 输出 | 含义 |
 |---|---|
-| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor>` | 发现 n 条新消息（seq 闭区间），进程即将退出 |
+| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），进程即将退出；`agent` 是本机处理端标识 |
 | `NO_MSG ...` | 仅 `--once` 模式：无新消息 |
 
 `--exec <command>` 允许在退出前执行任意命令（webhook/脚本），使哨兵能对接
@@ -71,3 +71,10 @@ VPS 网关提供的是 HTTP API。理论上可在本机与 VPS 之间再建一�
 - 一个机器人**同一时间只允许一条有效长连接**，新连接踢旧连接；高可用用主备切换
 - 官方 Node SDK：`@wecom/aibot-node-sdk`（心跳/重连/鉴权已封装）
 - 发送限频：单会话 30 条/分钟、1000 条/小时
+
+## 处理端在线状态（presence）
+
+- 客户端对网关的每个请求都带 `X-Relay-Agent: <agent_id>` 头（`poll.mjs` 全程带；`sentinel.mjs` 只在长跑循环里带，
+  `--once` / `--status` 是人手工执行的，不代表处理端在待命）。网关把它记成「处理端最近一次露面」，`/ack` 另记成「处理端在干活」。
+- `agent_online_secs`（默认 300 秒）内有过露面或 ack 就算在线，否则离线；进程刚起来还没见过任何 agent 时是 `null`（未知），按在线处理。
+  状态在 `/health` 里（`agent_online` / `agent_last_seen` / `last_agent` / `last_ack_at` / `pending`）；离线时企微的自动回复换成带离线时长的文案。

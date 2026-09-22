@@ -5,7 +5,7 @@
 ## 哨兵 / 拉取
 
 ### `401 token 无效`
-- `client/config.json` 的 `api_token` 与 server `.env` 的 `API_TOKEN` 不一致，或环境变量覆盖了错误值
+- `client/config.json` 的 `api_token` 与 server `config.json` 的 `http.api_token` 不一致，或环境变量覆盖了错误值
 - 检查优先级：环境变量 `WECOM_API_TOKEN` > config.json
 
 ### `sentinel --once` 一直 HTTP 5xx / 超时
@@ -16,7 +16,7 @@
 ### `/health` 返回 `connected: false`
 - VPS 无法出网到 `wss://openws.work.weixin.qq.com`
 - Bot ID / Secret 错误（`journalctl` 里看订阅失败原因）
-- Secret 被重置过：企微后台重新生成后更新 `.env` 并重启服务
+- Secret 被重置过：企微后台重新生成后更新 server `config.json` 的 `secret` 并重启服务
 
 ### 哨兵从未唤醒过 agent
 1. 确认哨兵以**后台任务**方式挂起（不是普通前台命令跑一下就结束）
@@ -25,6 +25,16 @@
    若 last_seen ≥ 服务端 seq，说明没有新消息（哨兵无错，等消息即可）
 4. 若 last_seen 被误推进（比如有人跑过 `--once`/`--status` 之外又手动改了游标），
    可删 `client/sentinel_cursor.json` 重挂哨兵（会以服务端已确认游标重新起步，有未 ack 的积压会立刻唤醒一次）
+
+### 用户收到「已收到。处理端已离线 X」的回复
+- 说明网关在 `agent_online_secs`（默认 300 秒）内没见过处理端：哨兵没在挂（电脑关机 / 处理完忘了重挂），
+  或 agent 超过这个时长没调过任何接口
+- 查 `/health` 的 `agent_last_seen`（最后一次露面时刻）和 `last_agent`（是哪台处理端），确认后重挂哨兵即可恢复
+- 注意 `sentinel.mjs --once` / `--status` 不报在线（它们常由人手工执行），只有长跑的哨兵和 `poll.mjs` 才算
+
+### `/health` 的 `agent_online` 是 `null`
+- 不是故障：网关刚重启，进程起来后还没见过任何 agent，状态「未知」，此时按在线处理
+- 挂上哨兵（或跑一次 `poll.mjs`）后就会变成 `true`
 
 ### 同一批消息反复唤醒 / 漏消息
 - last_seen 只在「发现新消息」与「初始化」时写盘；手动删除游标文件会导致重复消费一批

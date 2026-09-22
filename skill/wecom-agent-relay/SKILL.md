@@ -36,15 +36,16 @@ git clone https://github.com/hillghost86/wecom-agent-relay.git && cd wecom-agent
 cp client/config.example.json client/config.json
 ```
 
-编辑 `client/config.json`：`api_base` 填网关 HTTPS 地址（部署 server 后确定），`api_token` 填 server `.env` 里的 `API_TOKEN`。
+编辑 `client/config.json`：`api_base` 填网关 HTTPS 地址（部署 server 后确定），`api_token` 填 server `config.json` 里的 `http.api_token`。
+可选 `agent_id`：这台处理端在网关侧的标识，不填默认用本机主机名。
 **token/Secret 是敏感值：只写进 client/config.json（已在 .gitignore），不得写入对话或任何会入库的文件。**
 
 ### 第 3 步：部署 VPS 网关
 
 详细步骤见仓库 `server/README.md`。要点：
 
-1. 上传 `server/`（index.mjs、package.json、.env.example、wecom-bot.service）到 VPS `/opt/wecom-bot`
-2. `.env` 写入 `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`API_TOKEN`（`openssl rand -hex 32` 生成）；可选 `ADMIN_USERID` 收断线自报
+1. 上传 `server/`（index.mjs、package.json、config.example.json、wecom-bot.service）到 VPS `/opt/wecom-bot`
+2. `cp config.example.json config.json`，填四个值：`bot_id`、`secret`、`http.api_token`（`openssl rand -hex 32` 生成）、`admin_userid`（收断线自报的人）；然后 `chmod 600 config.json`。systemd 单元的 `ExecStart` 已经带 `--config /opt/wecom-bot/config.json`，不用再配环境变量
 3. `npm i`，装 systemd 单元：`sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」
 4. nginx/Caddy 把域名反代到 `http://127.0.0.1:8788` 并配 HTTPS
 
@@ -65,7 +66,7 @@ node client/sentinel.mjs --once    # 期望输出 NO_MSG（或 NEW_MSG）
 1. 用后台任务方式挂起哨兵（WorkBuddy 中即 run_in_background）：
    `node client/sentinel.mjs --interval 10`
 2. 向用户说明并固化闭环约定（写入项目记忆或用户记忆）：
-   - 哨兵退出（NEW_MSG 通知）→ WorkBuddy 被唤醒 → 从通知读 seq 范围 →
+   - 哨兵输出 `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` 后退出 → WorkBuddy 被唤醒 → 从通知读 seq 范围 →
      `GET /messages/<seq>` 逐条取 → 按内容处理 → `client/poll.mjs --reply <seq> <markdown>` 回复 →
      `client/poll.mjs --ack <最大seq>` → **重挂哨兵（铁律，不重挂 = 后续消息无人发现）**
 3. 让用户在企微里 @机器人 说一句话实测：预期 ≤10 秒收到回复。
@@ -75,6 +76,7 @@ node client/sentinel.mjs --once    # 期望输出 NO_MSG（或 NEW_MSG）
 - WorkBuddy 关闭/电脑关机期间消息在 VPS 攒着，不丢；下次会话用户说一句话即可补挂哨兵并补处理积压
 - 每次会话开始时检查哨兵是否在挂（后台任务列表），未挂则补挂
 - 处理消息时：有歧义（金额、客户名对不上）在群里追问，不要猜着办
+- 哨兵长跑时网关就知道处理端在线；哨兵没挂（电脑关机、忘了重挂）时用户发消息会收到「已收到。处理端已离线 X，上线后会处理」，带实际离线时长
 
 ## 参考
 

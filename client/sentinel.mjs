@@ -14,12 +14,12 @@
  *   node client/sentinel.mjs --help              帮助
  *
  * stdout 契约（供 agent / 自动化脚本解析）：
- *   NEW_MSG count=<n> seq=<a>-<b> acked=<cursor>   发现 n 条新消息（seq 闭区间）
- *   NO_MSG ...                                     --once 模式下无新消息
+ *   NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>   发现 n 条新消息（seq 闭区间）
+ *   NO_MSG ...                                                --once 模式下无新消息
  *
  * 配置（优先级：环境变量 > config.json）：
- *   WECOM_API_BASE / WECOM_API_TOKEN
- *   或同目录 config.json: { "api_base": "...", "api_token": "..." }
+ *   WECOM_API_BASE / WECOM_API_TOKEN / WECOM_AGENT_ID（可选，默认本机主机名）
+ *   或同目录 config.json: { "api_base": "...", "api_token": "...", "agent_id": "..." }
  *
  * 游标：sentinel_cursor.json 记录已见过的最大 seq（与服务端 ack 游标无关），
  *       同一批消息只触发一次退出；首次运行以服务端已确认游标起步，
@@ -33,6 +33,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -51,6 +52,7 @@ if (args.includes('--help') || args.includes('-h')) {
 const getArg = (name, dft) => { const i = args.indexOf(name); return i >= 0 ? Number(args[i + 1]) || dft : dft; };
 const INTERVAL_S = getArg('--interval', 10);
 const ONCE = args.includes('--once');
+const STATUS = args.includes('--status');
 const execIdx = args.indexOf('--exec');
 const EXEC_CMD = execIdx >= 0 ? (args[execIdx + 1] || '') : '';
 
@@ -61,7 +63,10 @@ if (!BASE || !TOKEN) {
   console.error('缺少配置：设置环境变量 WECOM_API_BASE / WECOM_API_TOKEN，或在同目录 config.json 填 api_base / api_token');
   process.exit(1);
 }
+const AGENT_ID = String(process.env.WECOM_AGENT_ID || fileCfg.agent_id || os.hostname() || 'unknown');
 const H = { Authorization: `Bearer ${TOKEN}` };
+// 只有长跑循环才报「处理端在线」：--once / --status 常由人手工执行，不代表 agent 在待命
+const POLL_H = ONCE || STATUS ? H : { ...H, 'X-Relay-Agent': AGENT_ID };
 
 let lastSeen = null;
 try { lastSeen = JSON.parse(fs.readFileSync(CURSOR_FILE, 'utf-8')).last_seen ?? null; } catch {}
@@ -70,11 +75,11 @@ const ts = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function probe() {
-  const r = await fetch(`${BASE}/health`, { headers: H, signal: AbortSignal.timeout(10_000) });
+  const r = await fetch(`${BASE}/health`, { headers: POLL_H, signal: AbortSignal.timeout(10_000) });
   if (r.status === 401) throw new Error('401 token 无效');
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const h = await r.json();
-  return { seq: Number(h.seq) || 0, connected: !!h.connected, cursor: Number(h.cursor) || 0 };
+  return { seq: Number(h.seq) || 0, connected: !!h.connected, cursor: Number(h.cursor) || 0, agentOnline: h.agent_online ?? null, lastAgent: h.last_agent || '' };
 }
 
 async function loop() {
@@ -94,7 +99,7 @@ async function loop() {
     if (h.seq > lastSeen) {
       const n = h.seq - lastSeen;
       fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: h.seq }));
-      console.log(`NEW_MSG count=${n} seq=${lastSeen + 1}-${h.seq} acked=${h.cursor}`);
+      console.log(`NEW_MSG count=${n} seq=${lastSeen + 1}-${h.seq} acked=${h.cursor} agent=${AGENT_ID}`);
       if (EXEC_CMD) {
         console.log(`[${ts()}] 执行 --exec 命令：${EXEC_CMD}`);
         const p = spawnSync(EXEC_CMD, { shell: true, stdio: 'inherit' });
@@ -108,9 +113,10 @@ async function loop() {
   }
 }
 
-if (args.includes('--status')) {
+if (STATUS) {
   const h = await probe().catch((e) => { console.error(e.message); process.exit(1); });
-  console.log(`本地 last_seen=${lastSeen ?? '未初始化'} | 服务端 seq=${h.seq} acked=${h.cursor} connected=${h.connected}`);
+  const who = h.agentOnline === null ? '未知' : h.agentOnline ? '在线' : '离线';
+  console.log(`本地 last_seen=${lastSeen ?? '未初始化'} | 服务端 seq=${h.seq} acked=${h.cursor} connected=${h.connected} | 处理端=${who}(${h.lastAgent || '未见过'})`);
   process.exit(0);
 }
 
