@@ -9,65 +9,168 @@
  *   4. 收到 aibot_msg_callback：打印 + 追加到 JSONL；5 秒内用同一个 req_id 回一帧 stream
  *   5. 断线：指数退避重连（1s → 60s 上限），永不放弃
  *
- * 环境变量：
- *   WECOM_BOT_ID       必填
- *   WECOM_BOT_SECRET   必填
- *   WECOM_WS_URL       可选，默认 wss://openws.work.weixin.qq.com
- *   MSG_LOG            可选，消息落盘路径，默认 ./messages.jsonl；设为 "off" 关闭
- *   REPLY_TEXT         可选，收到消息后自动回复的文本，默认 "已收到"；设为空串则不回复
- *   PING_INTERVAL_MS   可选，默认 30000
- *   HTTP_HOST          可选，HTTP API 监听地址，默认 127.0.0.1（对外开放请设 0.0.0.0 并务必配 API_TOKEN）
- *   HTTP_PORT          可选，默认 8788；设为 0 关闭 HTTP API
- *   API_TOKEN          可选，HTTP API 鉴权：Authorization: Bearer <token> 或 ?token=<token>
- *   ADMIN_USERID       可选，断线自报：重连成功后把离线时段推给这个 userid（含进程重启造成的空窗）
- *   TZ                 可选，自报里的时间显示时区，默认 Asia/Shanghai
+ * 配置：JSON 文件，`--config <路径>` 指定，默认取工作目录下的 config.json。
+ *   {
+ *     "http": { "host": "127.0.0.1", "port": 8788, "api_token": "<openssl rand -hex 32>" },
+ *     "tz": "Asia/Shanghai",              // 自报里的时间显示时区
+ *     "agent_online_secs": 300,           // 处理端多久没来访就算离线
+ *     "bots": [{ "key": "default", "bot_id": "...", "secret": "...",
+ *                "reply_text": "已收到", "reply_text_offline": "...{duration}...",
+ *                "admin_userid": "...", "offline_alert_mins": 0, "msg_log": "..." }]
+ *   }
+ *   可选项与默认值见 config.example.json。**当前版本只支持 bots 里的一个机器人。**
+ *   兼容期：没有 config.json 且有 WECOM_BOT_ID / WECOM_BOT_SECRET 时从环境变量拼配置，下个版本移除。
  *
  * 部署形态：本进程只在 127.0.0.1 上说明文 HTTP；HTTPS、证书、域名、对外端口由前面的反代
  * （nginx / Caddy / 宝塔）负责，反代把请求转到 127.0.0.1:8788 并原样透传 Authorization 头。
  *
  * HTTP API（给 agent 用）：
- *   GET  /health                         连接状态
+ *   GET  /health                         连接状态 + 处理端在线状态
  *   GET  /messages?after=<seq>&limit=50  拉 seq 大于 after 的消息（默认 after=已确认游标，limit 默认 50 最多 500）
  *   GET  /messages/<seq>                 按 seq 取单条，不存在返回 404
  *   GET  /ack?seq=<seq>                  把游标推进到 seq（之后 /messages 不带 after 时从这里开始）
  *   POST /send  {body}                   透传为 aibot_send_msg 帧（主动推送），返回企微回执
  *        body 规则（官方文档）：msgtype 只支持 markdown/template_card/file/image/voice/video，没有 text；
  *        chatid 单聊填用户 userid、群聊填群 chatid；chat_type 1=单聊 2=群聊，0 或不填自动兼容
+ *   请求头 X-Relay-Agent: <agent_id> 会被记成「处理端最近一次露面」，用来判在线和分档自动回复
  *   回复用户：直接 POST 消息里的 response_url（1 小时内一次），不经过本进程
  *
- * 运行：npm i && node --env-file=.env index.mjs
+ * 运行：npm i && node index.mjs --config /opt/wecom-bot/config.json
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 
-const cfg = {
-  botId: process.env.WECOM_BOT_ID || '',
-  secret: process.env.WECOM_BOT_SECRET || '',
-  wsUrl: process.env.WECOM_WS_URL || 'wss://openws.work.weixin.qq.com',
-  msgLog: process.env.MSG_LOG ?? path.join(process.cwd(), 'messages.jsonl'),
-  replyText: process.env.REPLY_TEXT ?? '已收到',
-  pingIntervalMs: Number(process.env.PING_INTERVAL_MS || 30000),
-  httpHost: process.env.HTTP_HOST || '127.0.0.1',
-  httpPort: Number(process.env.HTTP_PORT ?? 8788),
-  apiToken: process.env.API_TOKEN || '',
-  adminUserId: process.env.ADMIN_USERID || '',
-  tz: process.env.TZ || 'Asia/Shanghai',
-  outageMinSecs: Number(process.env.OUTAGE_MIN_SECS ?? 3),            // 低于这个秒数不报
-  outageReportMinMs: Number(process.env.OUTAGE_REPORT_MIN_MS ?? 60000), // 抖动时最多每分钟报一次
-  subscribeTimeoutMs: 10000,
-  backoffMinMs: 1000,
-  backoffMaxMs: 60000,
-};
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+const warn = (...a) => console.warn(new Date().toISOString(), ...a);
 
-if (!cfg.botId || !cfg.secret) {
-  console.error('缺少环境变量 WECOM_BOT_ID / WECOM_BOT_SECRET');
+const DEFAULT_REPLY_OFFLINE = '已收到。处理端已离线 {duration}，上线后会处理';
+
+/* ---------- 配置加载 ---------- */
+function argConfigPath(argv) {
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === '--config') return argv[i + 1] || '';
+    if (argv[i].startsWith('--config=')) return argv[i].slice('--config='.length);
+  }
+  return '';
+}
+
+/** 兼容期：老部署用环境变量配置，拼成和 config.json 一样的结构。下个版本移除。
+ *  WECOM_WS_URL 也在这里映射：不映射的话兼容路径只能连默认的真实网关，自测 / 自建网关无从指向。 */
+function configFromEnv() {
+  const port = process.env.HTTP_PORT;
+  return {
+    http: { host: process.env.HTTP_HOST, port: port === undefined ? undefined : Number(port), api_token: process.env.API_TOKEN },
+    tz: process.env.TZ,
+    ws_url: process.env.WECOM_WS_URL,
+    bots: [{
+      key: 'default',
+      bot_id: process.env.WECOM_BOT_ID,
+      secret: process.env.WECOM_BOT_SECRET,
+      reply_text: process.env.REPLY_TEXT,
+      admin_userid: process.env.ADMIN_USERID,
+      msg_log: process.env.MSG_LOG,
+    }],
+  };
+}
+
+function loadConfig() {
+  const argPath = argConfigPath(process.argv);
+  const file = argPath || path.join(process.cwd(), 'config.json');
+  if (fs.existsSync(file)) {
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    } catch (e) {
+      console.error(`配置文件 ${file} 解析失败：${e.message}`);
+      process.exit(1);
+    }
+    return normalizeConfig(raw, file);
+  }
+  // 指名道姓给了 --config 却找不到，多半是路径写错，不要悄悄退回环境变量
+  if (argPath) {
+    console.error(`找不到配置文件 ${file}`);
+    process.exit(1);
+  }
+  if (process.env.WECOM_BOT_ID && process.env.WECOM_BOT_SECRET) {
+    warn('未找到 config.json，已从环境变量加载；环境变量方式将在下个版本移除，请迁移到 config.json');
+    return normalizeConfig(configFromEnv(), '环境变量');
+  }
+  console.error(`找不到配置文件 ${file}，也没有 WECOM_BOT_ID / WECOM_BOT_SECRET 环境变量；请参照 config.example.json 建一份 config.json`);
   process.exit(1);
 }
 
-const log = (...a) => console.log(new Date().toISOString(), ...a);
-const warn = (...a) => console.warn(new Date().toISOString(), ...a);
+function normalizeConfig(raw, source) {
+  const errs = [];
+  if (!raw || typeof raw !== 'object') errs.push('配置内容必须是一个 JSON 对象');
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const h = r.http && typeof r.http === 'object' ? r.http : {};
+  const gw = {
+    httpHost: h.host ?? '127.0.0.1',
+    httpPort: Number(h.port ?? 8788),
+    apiToken: h.api_token ?? '',
+    tz: r.tz ?? 'Asia/Shanghai',
+    agentOnlineSecs: Number(r.agent_online_secs ?? 300),
+    wsUrl: r.ws_url ?? 'wss://openws.work.weixin.qq.com',
+    pingIntervalMs: Number(r.ping_interval_ms ?? 30000),
+    outageMinSecs: Number(r.outage_min_secs ?? 3),            // 低于这个秒数不报
+    outageReportMinMs: Number(r.outage_report_min_ms ?? 60000), // 抖动时最多每分钟报一次
+    subscribeTimeoutMs: 10000,
+    backoffMinMs: 1000,
+    backoffMaxMs: 60000,
+  };
+
+  const list = Array.isArray(r.bots) ? r.bots : [];
+  if (!list.length) errs.push('bots 不能为空，至少要配一个机器人');
+  const seenKeys = new Set();
+  const bots = list.map((b0, i) => {
+    const b = b0 && typeof b0 === 'object' ? b0 : {};
+    const key = b.key ?? (list.length === 1 ? 'default' : '');
+    const at = `bots[${i}]${key ? `（${key}）` : ''}`;
+    if (!key) errs.push(`${at}: 配了多个机器人时每个都必须有 key`);
+    else if (!/^[a-z0-9_-]+$/.test(key)) errs.push(`${at}: key 只允许小写字母、数字、下划线和减号`);
+    else if (seenKeys.has(key)) errs.push(`${at}: key 重复`);
+    seenKeys.add(key);
+    if (!b.bot_id) errs.push(`${at}: 缺少 bot_id`);
+    if (!b.secret) errs.push(`${at}: 缺少 secret`);
+    // 默认数据文件：default 用 messages.jsonl，和历史部署完全一致（零迁移）
+    const msgLog = b.msg_log ?? path.join(process.cwd(), key === 'default' ? 'messages.jsonl' : `messages.${key}.jsonl`);
+    return {
+      key,
+      botId: b.bot_id || '',
+      secret: b.secret || '',
+      replyText: b.reply_text ?? '已收到',
+      replyTextOffline: b.reply_text_offline ?? DEFAULT_REPLY_OFFLINE,
+      adminUserId: b.admin_userid ?? '',
+      offlineAlertMins: Number(b.offline_alert_mins ?? 0),
+      msgLog,
+    };
+  });
+
+  if (errs.length) {
+    console.error(`配置有误（来源：${source}）：\n- ${errs.join('\n- ')}`);
+    process.exit(1);
+  }
+  if (bots.length > 1) {
+    console.error('配置里有多个机器人，当前版本只支持一个；多 bot 支持将在后续版本提供');
+    process.exit(1);
+  }
+  return { gw, bots };
+}
+
+const { gw, bots: botConfigs } = loadConfig();
+
+const fmtTime = (ms) => new Date(ms).toLocaleString('zh-CN', { timeZone: gw.tz, hour12: false });
+/** 离线时长的中文说法：一分钟内说秒，一小时内说分钟，再往上说小时（一位小数，整数不带小数点） */
+function fmtDuration(secs) {
+  if (secs < 60) return `${secs} 秒`;
+  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟`;
+  const h = Math.round((secs / 3600) * 10) / 10;
+  return `${Number.isInteger(h) ? h : h.toFixed(1)} 小时`;
+}
+// 日志里的 response_url 只留尾部：它是一次性的回复凭证，进了 journal 就等于泄露
+const maskBody = (b) => (b && b.response_url ? { ...b, response_url: '…' + String(b.response_url).slice(-8) } : b);
 
 /* ---------- WebSocket 实现：优先 ws 包，否则内置 ----------
  * 实测 Node 内置 WebSocket（undici）在某些代理/TUN 环境下对企微网关握手失败（non-101），
@@ -94,6 +197,8 @@ class MessageStore {
     this.items = [];
     this.seq = 0;
     this.cursor = 0;
+    this.loadedState = {};   // 游标之外的字段（presence）由 Bot 取用
+    this.extraState = () => ({}); // Bot 注入：和 cursor 一起写进 .state.json
     this.load();
   }
   load() {
@@ -111,7 +216,8 @@ class MessageStore {
         }
       }
       if (fs.existsSync(this.stateFile)) {
-        this.cursor = Number(JSON.parse(fs.readFileSync(this.stateFile, 'utf-8')).cursor) || 0;
+        this.loadedState = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8')) || {};
+        this.cursor = Number(this.loadedState.cursor) || 0;
       }
       log(`消息存储已加载：${this.items.length} 条，seq=${this.seq}，游标=${this.cursor}`);
     } catch (e) {
@@ -148,45 +254,101 @@ class MessageStore {
   ack(seq) {
     // 钳到当前最大 seq：误传大数会让之后的消息全部落在游标之下被跳过
     this.cursor = Math.max(this.cursor, Math.min(seq, this.seq));
-    if (this.stateFile) {
-      try { fs.writeFileSync(this.stateFile, JSON.stringify({ cursor: this.cursor })); } catch (e) { warn('写游标失败:', e.message); }
-    }
     return this.cursor;
   }
+  saveState() {
+    if (!this.stateFile) return;
+    try { fs.writeFileSync(this.stateFile, JSON.stringify({ cursor: this.cursor, ...this.extraState() })); } catch (e) { warn('写游标失败:', e.message); }
+  }
 }
-const store = new MessageStore(cfg.msgLog);
-const appendMsgLog = (record) => store.append(record);
 
-/* ---------- 最后在线时刻：每次心跳写一次，重启后用来算空窗 ---------- */
-const aliveFile = cfg.msgLog && cfg.msgLog !== 'off' ? cfg.msgLog + '.alive' : null;
-function writeAlive() {
-  if (!aliveFile) return;
-  try { fs.writeFileSync(aliveFile, String(Date.now())); } catch {}
-}
-function readAlive() {
-  if (!aliveFile) return null;
-  try { const t = Number(fs.readFileSync(aliveFile, 'utf-8')); return Number.isFinite(t) && t > 0 ? t : null; } catch { return null; }
-}
-const fmtTime = (ms) => new Date(ms).toLocaleString('zh-CN', { timeZone: cfg.tz, hour12: false });
-// 日志里的 response_url 只留尾部：它是一次性的回复凭证，进了 journal 就等于泄露
-const maskBody = (b) => (b && b.response_url ? { ...b, response_url: '…' + String(b.response_url).slice(-8) } : b);
+/* ---------- 一个机器人的全部运行时：存储、去重、在线状态、连接 ---------- */
+class Bot {
+  constructor(conf) {
+    this.key = conf.key;
+    this.conf = conf;
+    this.store = new MessageStore(conf.msgLog);
+    // 最后在线时刻：每次心跳写一次，重启后用来算空窗
+    this.aliveFile = conf.msgLog && conf.msgLog !== 'off' ? conf.msgLog + '.alive' : null;
+    this.seenMsgIds = new Set();
+    this.conn = null;
+    // 处理端（agent）在线状态：毫秒时间戳，0 = 没见过
+    const st = this.store.loadedState || {};
+    this.presence = {
+      lastSeen: Number(st.agent_last_seen) || 0,
+      lastAgent: String(st.last_agent || ''),
+      lastAckAt: Number(st.last_ack_at) || 0,
+    };
+    this.store.extraState = () => ({
+      agent_last_seen: this.presence.lastSeen,
+      last_agent: this.presence.lastAgent,
+      last_ack_at: this.presence.lastAckAt,
+    });
+    this.lastStateSaveAt = 0;
+    this.offlineAlerted = false;
+  }
 
-/* ---------- 去重（企微可能重推） ---------- */
-const seenMsgIds = new Set();
-function isDuplicate(msgid) {
-  if (!msgid) return false;
-  if (seenMsgIds.has(msgid)) return true;
-  seenMsgIds.add(msgid);
-  if (seenMsgIds.size > 5000) seenMsgIds.delete(seenMsgIds.values().next().value);
-  return false;
+  saveState() {
+    this.lastStateSaveAt = Date.now();
+    this.store.saveState();
+  }
+
+  /** HTTP 请求带了 X-Relay-Agent 就算处理端露了一面 */
+  touchAgent(agentId) {
+    const now = Date.now();
+    this.presence.lastSeen = now;
+    if (agentId) this.presence.lastAgent = String(agentId).slice(0, 64);
+    // agent 每 10 秒来一次，不能每次都写盘；超过 60 秒才落一次
+    if (now - this.lastStateSaveAt > 60000) this.saveState();
+  }
+
+  lastAgentSeenAt() {
+    return Math.max(this.presence.lastSeen, this.presence.lastAckAt);
+  }
+
+  /** true 在线 / false 离线 / null 未知（进程起来后还没见过任何 agent） */
+  agentOnline() {
+    const last = this.lastAgentSeenAt();
+    if (!last) return null;
+    return Date.now() - last < gw.agentOnlineSecs * 1000;
+  }
+
+  offlineSecs() {
+    const last = this.lastAgentSeenAt();
+    return last ? Math.round((Date.now() - last) / 1000) : 0;
+  }
+
+  pending() {
+    return Math.max(0, this.store.seq - this.store.cursor);
+  }
+
+  /** 企微可能重推同一条消息 */
+  isDuplicate(msgid) {
+    if (!msgid) return false;
+    if (this.seenMsgIds.has(msgid)) return true;
+    this.seenMsgIds.add(msgid);
+    if (this.seenMsgIds.size > 5000) this.seenMsgIds.delete(this.seenMsgIds.values().next().value);
+    return false;
+  }
+
+  writeAlive() {
+    if (!this.aliveFile) return;
+    try { fs.writeFileSync(this.aliveFile, String(Date.now())); } catch {}
+  }
+  readAlive() {
+    if (!this.aliveFile) return null;
+    try { const t = Number(fs.readFileSync(this.aliveFile, 'utf-8')); return Number.isFinite(t) && t > 0 ? t : null; } catch { return null; }
+  }
 }
 
 /* ---------- 连接管理 ---------- */
 class BotConnection {
-  constructor(WS) {
+  constructor(WS, bot) {
     this.WS = WS;
+    this.bot = bot;
+    this.conf = bot.conf;
     this.ws = null;
-    this.backoffMs = cfg.backoffMinMs;
+    this.backoffMs = gw.backoffMinMs;
     this.pingTimer = null;
     this.missedPongs = 0;
     this.pending = new Map(); // req_id -> { resolve, reject, timer }
@@ -204,21 +366,21 @@ class BotConnection {
     let reason = '连接中断';
     if (!this.everSubscribed) {
       // 进程刚启动：用上次心跳写的在线时刻算重启空窗
-      const last = readAlive();
+      const last = this.bot.readAlive();
       if (last) { since = last; reason = '进程重启'; }
     }
     this.everSubscribed = true;
     this.downSince = null;
-    writeAlive();
-    if (!since || !cfg.adminUserId) return;
+    this.bot.writeAlive();
+    if (!since || !this.conf.adminUserId) return;
     const now = Date.now();
     const secs = Math.round((now - since) / 1000);
-    if (secs < cfg.outageMinSecs) return; // 秒级抖动不打扰
-    if (now - this.lastOutageReportAt < cfg.outageReportMinMs) { log(`离线 ${secs}s（${reason}），1 分钟内已报过，跳过`); return; }
+    if (secs < gw.outageMinSecs) return; // 秒级抖动不打扰
+    if (now - this.lastOutageReportAt < gw.outageReportMinMs) { log(`离线 ${secs}s（${reason}），1 分钟内已报过，跳过`); return; }
     this.lastOutageReportAt = now;
     const content = `⚠️ 机器人离线 **${secs} 秒**（${reason}）\n${fmtTime(since)} → ${fmtTime(now)}\n期间发给机器人的消息已丢失，请重发。`;
     try {
-      const resp = await this.request({ cmd: 'aibot_send_msg', body: { chatid: cfg.adminUserId, chat_type: 1, msgtype: 'markdown', markdown: { content } } }, 10000);
+      const resp = await this.request({ cmd: 'aibot_send_msg', body: { chatid: this.conf.adminUserId, chat_type: 1, msgtype: 'markdown', markdown: { content } } }, 10000);
       if (resp.errcode === 0) log(`断线自报已发送：离线 ${secs}s（${reason}）`);
       else warn(`断线自报被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
     } catch (e) {
@@ -244,8 +406,8 @@ class BotConnection {
 
   connect() {
     if (this.stopped) return;
-    log(`连接 ${cfg.wsUrl} ...`);
-    const ws = new this.WS(cfg.wsUrl);
+    log(`连接 ${gw.wsUrl} ...`);
+    const ws = new this.WS(gw.wsUrl);
     this.ws = ws;
     this.subscribed = false;
     this.missedPongs = 0;
@@ -269,7 +431,7 @@ class BotConnection {
   scheduleReconnect() {
     if (this.stopped) return;
     const delay = this.backoffMs;
-    this.backoffMs = Math.min(this.backoffMs * 2, cfg.backoffMaxMs);
+    this.backoffMs = Math.min(this.backoffMs * 2, gw.backoffMaxMs);
     log(`${delay / 1000}s 后重连`);
     setTimeout(() => this.connect(), delay);
   }
@@ -285,17 +447,17 @@ class BotConnection {
   async onOpen() {
     log('TCP/WS 已建立，发送订阅');
     try {
-      const resp = await this.request({ cmd: 'aibot_subscribe', body: { bot_id: cfg.botId, secret: cfg.secret } }, cfg.subscribeTimeoutMs);
+      const resp = await this.request({ cmd: 'aibot_subscribe', body: { bot_id: this.conf.botId, secret: this.conf.secret } }, gw.subscribeTimeoutMs);
       if (resp.errcode !== 0) {
         warn(`订阅失败 errcode=${resp.errcode} errmsg=${resp.errmsg}；检查 BotID/Secret。为避免触发频率限制，退避到上限再重试`);
-        this.backoffMs = cfg.backoffMaxMs;
+        this.backoffMs = gw.backoffMaxMs;
         this.ws.close();
         return;
       }
       this.subscribed = true;
-      this.backoffMs = cfg.backoffMinMs;
+      this.backoffMs = gw.backoffMinMs;
       log('订阅成功，开始心跳');
-      this.pingTimer = setInterval(() => this.heartbeat(), cfg.pingIntervalMs);
+      this.pingTimer = setInterval(() => this.heartbeat(), gw.pingIntervalMs);
       this.reportOutage();
     } catch (e) {
       warn('订阅异常:', e.message);
@@ -305,10 +467,10 @@ class BotConnection {
 
   async heartbeat() {
     try {
-      const resp = await this.request({ cmd: 'ping' }, cfg.pingIntervalMs);
+      const resp = await this.request({ cmd: 'ping' }, gw.pingIntervalMs);
       if (resp.errcode !== 0) warn(`ping 回包异常 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
       this.missedPongs = 0;
-      writeAlive();
+      this.bot.writeAlive();
     } catch {
       this.missedPongs++;
       warn(`心跳无回包 (${this.missedPongs})`);
@@ -369,37 +531,48 @@ class BotConnection {
         return this.onMsgCallback(frame);
       case 'aibot_event_callback':
         log('【事件】', JSON.stringify(maskBody(frame.body)));
-        appendMsgLog({ kind: 'event', req_id: reqId, body: frame.body });
+        this.bot.store.append({ kind: 'event', req_id: reqId, body: frame.body });
         return;
       default:
         log('【其他帧】', JSON.stringify(frame).slice(0, 500));
     }
   }
 
+  /** 自动回复文案：处理端在线或状态未知用 reply_text，确认离线时换成带离线时长的那句 */
+  replyTextNow() {
+    const { replyText, replyTextOffline } = this.conf;
+    if (!replyText) return '';                       // 配成空串就是不回帧
+    if (this.bot.agentOnline() === false) {
+      return String(replyTextOffline || '').replace(/\{duration\}/g, fmtDuration(this.bot.offlineSecs()));
+    }
+    return replyText;
+  }
+
   onMsgCallback(frame) {
     const b = frame.body || {};
     const reqId = frame.headers?.req_id;
     // 企微重推（同 msgid、新 req_id）多半是上次没在 5 秒内收到回帧：不再落盘，但这次一定要回帧
-    if (isDuplicate(b.msgid)) {
+    if (this.bot.isDuplicate(b.msgid)) {
       log('重复消息，只回帧不落盘', b.msgid);
     } else {
       this.lastMsgAt = new Date().toISOString();
       log('【收到消息】', JSON.stringify(maskBody(b)));
       log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
       if (b.msgtype === 'text') log('  文本=', b.text?.content);
-      appendMsgLog({ kind: 'message', req_id: reqId, body: b });
+      this.bot.store.append({ kind: 'message', req_id: reqId, body: b });
     }
 
     // 5 秒内必须回一帧；用同一个 req_id
-    if (cfg.replyText) {
+    const text = this.replyTextNow();
+    if (text) {
       const reply = {
         cmd: 'aibot_respond_msg',
         headers: { req_id: reqId },
-        body: { msgtype: 'stream', stream: { id: randomUUID().replace(/-/g, ''), finish: true, content: cfg.replyText } },
+        body: { msgtype: 'stream', stream: { id: randomUUID().replace(/-/g, ''), finish: true, content: text } },
       };
       try {
         this.send(reply);
-        log('  已回复:', cfg.replyText);
+        log('  已回复:', text);
       } catch (e) {
         warn('  回复失败:', e.message);
       }
@@ -407,21 +580,51 @@ class BotConnection {
   }
 }
 
+/* ---------- 管理员离线告警（offline_alert_mins > 0 且配了 admin_userid 才开） ---------- */
+function startOfflineAlert(bot) {
+  const mins = bot.conf.offlineAlertMins;
+  if (!(mins > 0) || !bot.conf.adminUserId) return null;
+  const tick = async () => {
+    const conn = bot.conn;
+    if (!conn || !conn.subscribed) return; // 未订阅时发不出去，跳过本轮
+    const online = bot.agentOnline();
+    const pending = bot.pending();
+    let content = '';
+    if (online === false && bot.offlineSecs() >= mins * 60 && pending > 0 && !bot.offlineAlerted) {
+      bot.offlineAlerted = true;
+      content = `⚠️ 处理端已离线 ${fmtDuration(bot.offlineSecs())}，积压 ${pending} 条消息无人处理`;
+    } else if (online === true && bot.offlineAlerted) {
+      bot.offlineAlerted = false;
+      content = `✅ 处理端已恢复（${bot.presence.lastAgent || '未知'}），当前积压 ${pending} 条`;
+    }
+    if (!content) return;
+    try {
+      const resp = await conn.request({ cmd: 'aibot_send_msg', body: { chatid: bot.conf.adminUserId, chat_type: 1, msgtype: 'markdown', markdown: { content } } }, 10000);
+      if (resp.errcode === 0) log('离线告警已发送:', content);
+      else warn(`离线告警被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
+    } catch (e) {
+      warn('离线告警失败:', e.message);
+    }
+  };
+  return setInterval(tick, Math.min(10000, mins * 60000));
+}
+
 /* ---------- HTTP API ---------- */
-function startHttpServer(conn) {
-  if (!cfg.httpPort) return null;
-  const loopback = cfg.httpHost === '127.0.0.1' || cfg.httpHost === 'localhost' || cfg.httpHost === '::1';
+function startHttpServer(bot) {
+  if (!gw.httpPort) return null;
+  const conn = () => bot.conn;
+  const loopback = gw.httpHost === '127.0.0.1' || gw.httpHost === 'localhost' || gw.httpHost === '::1';
   if (!loopback) {
     // 正常部署不应走到这里：对外应由反代做 HTTPS。允许但必须有强 token，并明确警告。
-    if (!cfg.apiToken || cfg.apiToken.length < 32) {
-      console.error('HTTP_HOST 对外监听时必须设置至少 32 字符的 API_TOKEN（建议 openssl rand -hex 32）');
+    if (!gw.apiToken || gw.apiToken.length < 32) {
+      console.error('http.host 对外监听时必须设置至少 32 字符的 http.api_token（建议 openssl rand -hex 32）');
       process.exit(1);
     }
-    warn(`HTTP API 以明文 HTTP 对外监听 ${cfg.httpHost}，token 和 response_url 会在链路上裸奔；请改为 127.0.0.1 并用反代做 HTTPS`);
+    warn(`HTTP API 以明文 HTTP 对外监听 ${gw.httpHost}，token 和 response_url 会在链路上裸奔；请改为 127.0.0.1 并用反代做 HTTPS`);
   }
   const tokenOk = (tok) => {
     if (!tok) return false;
-    const a = Buffer.from(String(tok)), b = Buffer.from(cfg.apiToken);
+    const a = Buffer.from(String(tok)), b = Buffer.from(gw.apiToken);
     return a.length === b.length && timingSafeEqual(a, b);
   };
   // 在反代后面时，真实来源在 X-Forwarded-For 第一段；直连时用 socket 地址
@@ -433,6 +636,7 @@ function startHttpServer(conn) {
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(obj));
   };
+  const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
   const readBody = (req) => new Promise((resolve, reject) => {
     let b = '';
     req.on('data', (d) => { b += d; if (b.length > 1e6) { reject(new Error('body too large')); req.destroy(); } });
@@ -442,7 +646,7 @@ function startHttpServer(conn) {
 
   const handler = async (req, res) => {
     const url = new URL(req.url, 'http://x');
-    if (cfg.apiToken) {
+    if (gw.apiToken) {
       const auth = req.headers.authorization || '';
       const tok = auth.startsWith('Bearer ') ? auth.slice(7) : url.searchParams.get('token');
       if (!tokenOk(tok)) {
@@ -450,16 +654,26 @@ function startHttpServer(conn) {
         return json(res, 401, { ok: false, error: 'unauthorized' });
       }
     }
+    // 鉴权过了才认这个头：处理端每次来访都刷新在线状态
+    const agentId = req.headers['x-relay-agent'];
+    if (agentId) bot.touchAgent(agentId);
+    const store = bot.store;
     try {
       if (req.method === 'GET' && url.pathname === '/health') {
         return json(res, 200, {
           ok: true,
-          connected: !!conn.ws && conn.ws.readyState === 1,
-          subscribed: conn.subscribed,
-          last_msg_at: conn.lastMsgAt,
+          connected: !!conn()?.ws && conn().ws.readyState === 1,
+          subscribed: !!conn()?.subscribed,
+          last_msg_at: conn()?.lastMsgAt ?? null,
           seq: store.seq,
           cursor: store.cursor,
           count: store.items.length,
+          bot: bot.key,
+          agent_online: bot.agentOnline(),
+          agent_last_seen: iso(bot.presence.lastSeen),
+          last_agent: bot.presence.lastAgent || null,
+          last_ack_at: iso(bot.presence.lastAckAt),
+          pending: bot.pending(),
         });
       }
       if (req.method === 'GET' && url.pathname === '/messages') {
@@ -481,7 +695,10 @@ function startHttpServer(conn) {
       if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/ack') {
         const seq = Number(url.searchParams.get('seq'));
         if (!Number.isFinite(seq)) return json(res, 400, { ok: false, error: 'seq required' });
-        return json(res, 200, { ok: true, cursor: store.ack(seq) });
+        bot.presence.lastAckAt = Date.now();
+        const cursor = store.ack(seq);
+        bot.saveState();
+        return json(res, 200, { ok: true, cursor });
       }
       if (req.method === 'POST' && url.pathname === '/send') {
         let body;
@@ -489,7 +706,7 @@ function startHttpServer(conn) {
         // 企微拒绝、未订阅、等回执超时都返回 200：反代/Cloudflare 会把 5xx 换成自己的错误页，吞掉原因
         let resp;
         try {
-          resp = await conn.sendFrame({ cmd: 'aibot_send_msg', body });
+          resp = await conn().sendFrame({ cmd: 'aibot_send_msg', body });
         } catch (e) {
           warn(`/send 未能发出：${e.message}`);
           return json(res, 200, { ok: false, error: e.message });
@@ -503,23 +720,33 @@ function startHttpServer(conn) {
     }
   };
   const server = http.createServer(handler);
-  server.listen(cfg.httpPort, cfg.httpHost, () => {
-    log(`HTTP API 监听 http://${cfg.httpHost}:${server.address().port}${cfg.apiToken ? '（需 token）' : '（无 token，仅限本机）'}`);
+  server.listen(gw.httpPort, gw.httpHost, () => {
+    log(`HTTP API 监听 http://${gw.httpHost}:${server.address().port}${gw.apiToken ? '（需 token）' : '（无 token，仅限本机）'}`);
   });
   return server;
 }
 
 /* ---------- 入口 ---------- */
 const WS = await getWebSocketCtor();
-const conn = new BotConnection(WS);
-conn.start();
-const httpServer = startHttpServer(conn);
+const bots = botConfigs.map((c) => new Bot(c));
+const alertTimers = [];
+for (const bot of bots) {
+  bot.conn = new BotConnection(WS, bot);
+  bot.conn.start();
+  const t = startOfflineAlert(bot);
+  if (t) alertTimers.push(t);
+}
+const httpServer = startHttpServer(bots[0]);
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     log(`收到 ${sig}，退出`);
-    if (conn.subscribed) writeAlive();
-    conn.stop();
+    for (const bot of bots) {
+      if (bot.conn?.subscribed) bot.writeAlive();
+      bot.saveState();
+      bot.conn?.stop();
+    }
+    for (const t of alertTimers) clearInterval(t);
     if (httpServer) httpServer.close();
     setTimeout(() => process.exit(0), 300);
   });

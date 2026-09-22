@@ -80,6 +80,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 
 ## 工作流
 
+- **分模型分工**：主会话（Fable）只做方案、任务编排、审核与验收；写代码一律派 `coder` 子代理（Opus，定义在 `.claude/agents/coder.md`，缺失时按该文件重建）。派活前方案须已经用户确认；任务说明把方案、涉及文件、验证要求写全（子代理看不到对话历史）；同一时间只派一个写码代理；回来后主会话自己看 diff、复跑 `test_mock.mjs`，不以子代理的汇报代替验证。
 - 一个改动做完的标准：语法检查过、mock 测试过、README 同步、给出部署命令、列出需要通知 WorkBuddy 的接口变化。
 - 待办和已知问题记在回复里，用户说记录再写进文档；仓库暂无待办文件。
 

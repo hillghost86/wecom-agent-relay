@@ -16,3 +16,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# 本机 agent 定义
+.claude/

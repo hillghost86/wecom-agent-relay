@@ -1,0 +1,16 @@
+{
+  "http": { "host": "127.0.0.1", "port": 8788, "api_token": "<openssl rand -hex 32>" },
+  "tz": "Asia/Shanghai",
+  "agent_online_secs": 300,
+  "bots": [
+    {
+      "key": "default",
+      "bot_id": "<企微 Bot ID>",
+      "secret": "<企微 Secret>",
+      "reply_text": "已收到",
+      "reply_text_offline": "已收到。处理端已离线 {duration}，上线后会处理",
+      "admin_userid": "<收断线自报的 userid>",
+      "offline_alert_mins": 0
+    }
+  ]
+}
