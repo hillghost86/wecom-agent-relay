@@ -5,6 +5,7 @@ config.*.json
 !config.example.json
 sentinel_cursor.json
 messages.jsonl*
+messages.*.jsonl*
 *.log
 
 # 依赖
