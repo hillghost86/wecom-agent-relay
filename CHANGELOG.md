@@ -3,7 +3,7 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
-## 未发布
+## v0.2.1 — 2026-09-24
 
 ### 文档
 - 新增 `docs/` 参考手册，入口 `docs/README.md` 按「我想查什么」和功能索引：HTTP API 完整字段（含消息记录格式）、服务端与客户端全部配置项、部署 / 升级 / `.env` 迁移、企微协议事实（标注文档 / 实测 / 推断，含媒体文件解密方法）、处理端在线状态、agent 接入与 `poll.mjs` 命令表、路线图。根 README、`server/README.md`、CLAUDE.md 指向它。
