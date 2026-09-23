@@ -8,7 +8,7 @@
 - 任何 `/ack` 记为「处理端在干活」（`last_ack_at`），带不带头都算。
 - 两者取较晚的一个，距今不超过 `agent_online_secs`（默认 300 秒）为在线 `true`，否则离线 `false`。
 - 网关从没见过任何 agent（全新部署、或状态文件被删）时为 `null`（未知），**按在线处理**。
-- 状态和游标一起存在 `messages.jsonl.state.json`，网关重启不丢。露面时间在内存里实时更新，写盘最多每 60 秒一次。
+- 状态和游标一起存在 `messages/messages.<key>.jsonl.state.json`，网关重启不丢。露面时间在内存里实时更新，写盘最多每 60 秒一次。
 
 ## 谁会带头
 

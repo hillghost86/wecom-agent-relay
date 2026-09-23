@@ -100,7 +100,7 @@ curl -s -X POST "$BOT_API/send" -H "Authorization: Bearer $BOT_TOKEN" -H 'Conten
 
 ## 消息记录格式
 
-`messages.jsonl` 每行一条，`/messages` 返回的就是这些行：
+`messages/messages.<key>.jsonl` 每行一条，`/messages` 返回的就是这些行：
 
 ```json
 {

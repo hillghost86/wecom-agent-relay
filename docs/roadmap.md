@@ -14,11 +14,11 @@
 
 - **Cloudflare Durable Object 免费版**：普通 Worker 不能维持 WebSocket，Durable Object 加定时唤醒可以；按估算免费额度（每天约 13000 GB·秒）够一个 bot 用。VPS 版跑稳之后再做。
 - **移除环境变量兼容**：v0.2.0 之后的下一个版本删掉 `.env` 启动方式。
-- **小改进**（代码审核时记下、暂未做）：连接关闭用 `terminate()` 代替 `close()` 避免半开连接；启动时加载 `messages.jsonl` 限定读取量；`messages.jsonl` 按月轮转。
+- **小改进**（代码审核时记下、暂未做）：连接关闭用 `terminate()` 代替 `close()` 避免半开连接；启动时加载 `messages/messages.<key>.jsonl` 限定读取量；消息文件按月轮转。
 
 ## 已完成
 
-- **多 bot**：`config.json` 的 `bots` 可以配多个，同一个进程里每个 bot 各自一条连接、各自的 `messages.<key>.jsonl` 和游标、各自的在线状态与断线自报。接口加前缀 `/bots/<key>/…`，无前缀接口指向 `bots` 里第一个；token 分管理员和 bot 两级；管理员可用 `GET /bots` 看全部状态。约定一个 agent 对应一个 bot。见 [config.md § 配置多个机器人](config.md#配置多个机器人)、[api.md § 多 bot 路由](api.md#多-bot-路由)。
+- **多 bot**：`config.json` 的 `bots` 可以配多个，同一个进程里每个 bot 各自一条连接、各自的 `messages/messages.<key>.jsonl` 和游标、各自的在线状态与断线自报。接口加前缀 `/bots/<key>/…`，无前缀接口指向 `bots` 里第一个；token 分管理员和 bot 两级；管理员可用 `GET /bots` 看全部状态。约定一个 agent 对应一个 bot。见 [config.md § 配置多个机器人](config.md#配置多个机器人)、[api.md § 多 bot 路由](api.md#多-bot-路由)。
 
 ## 已决定不做
 

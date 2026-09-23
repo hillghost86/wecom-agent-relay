@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 目录 | 运行位置 | 说明 |
 |---|---|---|
-| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
+| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages/messages.<key>.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
 | `client/` | agent 所在机器 | `sentinel.mjs` 哨兵：轮询发现新消息即退出以唤醒对话式 agent；`poll.mjs`：拉取 / 单条取 / 回复 / 推送 / ack 的命令行工具 |
 | `skill/wecom-agent-relay/` | 随仓库分发 | WorkBuddy 技能：一句话安装引导 + 架构说明 + 排障手册。改接口、改部署步骤时要同步它 |
 | `docs/` | 随仓库分发 | 参考手册，入口 `docs/README.md` 按功能索引：`api.md` `config.md` `deploy.md` `protocol.md` `presence.md` `agent-integration.md` `roadmap.md`。找功能先看这里 |
@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 57 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
+node test_mock.mjs                       # 必做：起假网关跑 59 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
 node index.mjs --config <路径>           # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
 
 # —— 只读检查生产（管理员 token，不带 X-Relay-Agent 头）——

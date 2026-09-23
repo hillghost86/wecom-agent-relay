@@ -1,6 +1,6 @@
 # server · VPS 长连接网关
 
-常驻 VPS 的 WebSocket 客户端：连企业微信智能机器人的长连接网关收消息，落盘到 `messages.jsonl`，
+常驻 VPS 的 WebSocket 客户端：连企业微信智能机器人的长连接网关收消息，落盘到 `messages/messages.<key>.jsonl`，
 通过 HTTP API 供本机 agent 拉取。企微会静默丢弃机器人离线期间的消息，这台 7×24 在线的 VPS 是唯一持久层。
 整体架构和客户端用法见[仓库根 README](../README.md)；每个接口的字段、每个配置项的含义、升级与迁移步骤见 [docs/](../docs/README.md)。
 
@@ -94,12 +94,12 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 
 ## 数据与行为
 
-- `messages.jsonl` 每行一条，带递增 `seq`，`body` 是企微原始消息体；游标存在 `messages.jsonl.state.json`。
+- `messages/messages.<key>.jsonl` 每行一条（单 bot 是 `messages/messages.default.jsonl`），带递增 `seq`，`body` 是企微原始消息体；游标存在同名的 `.state.json`。
 - 单聊消息只有 `from.userid`，群聊才有 `chatid`。
 - 事件（如用户点开聊天窗时的 `enter_chat`）也会落盘（`kind: "event"`）并占 `seq`，但不计入 `pending`、不唤醒哨兵；`/messages` 加 `kind=message` 可过滤掉。
 - 心跳 30 秒，断线指数退避重连，凭证错误退避 60 秒。重复 `msgid`（企微重推）仍回「已收到」帧但不再落盘。
 - **断线期间的消息企微不补发，直接丢，且用户端显示发送成功**（2026-09-22 实测：停服务 → 发消息 → 启服务，日志无该消息）。所以连接在线率就是消息可靠性，重启服务尽量挑没人用的时候。
-- **断线自报**：配置里填 `admin_userid: "<你的 userid>"` 后，每次重连成功进程会给这个人推一条离线时段（起止时间、秒数、原因是连接中断还是进程重启），提醒期间的消息要重发。进程重启的空窗靠心跳每 30 秒写一次的 `messages.jsonl.alive` 文件推算，所以 VPS 宕机也能报出来。3 秒以内不报，抖动时每分钟最多报一次。
+- **断线自报**：配置里填 `admin_userid: "<你的 userid>"` 后，每次重连成功进程会给这个人推一条离线时段（起止时间、秒数、原因是连接中断还是进程重启），提醒期间的消息要重发。进程重启的空窗靠心跳每 30 秒写一次的 `messages/messages.<key>.jsonl.alive` 文件推算，所以 VPS 宕机也能报出来。3 秒以内不报，抖动时每分钟最多报一次。
 - 收到消息后 5 秒内自动回「已收到」（`reply_text`，留空则不回），和 agent 之后的 `response_url` 回复互不影响。
 - **处理端在线状态**：任何带 `X-Relay-Agent: <agent_id>` 头的请求都算处理端露了一面，`/ack` 则算处理端在干活；
   `agent_online_secs`（默认 300 秒）内有过其中之一就算在线。进程刚起来还没见过任何 agent 时状态是 `null`（未知），按在线处理。
@@ -112,7 +112,7 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 ## 自测
 
 ```bash
-node test_mock.mjs     # 起假网关，57 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
+node test_mock.mjs     # 起假网关，59 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
 ```
 
 ## 文件

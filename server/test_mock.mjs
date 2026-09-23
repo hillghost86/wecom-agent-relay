@@ -11,7 +11,8 @@
  *   9. presence：X-Relay-Agent 记在线、/health 带出状态、离线时自动回复分档、管理员离线告警
  *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载
  *  12. 多 bot：另起一个两 bot 的服务端进程，验证各自连接与落盘、/bots/<key>/ 前缀路由、两级 token（401/403/404）、
- *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀
+ *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀、
+ *      不写 msg_log 时默认落到工作目录下 messages/messages.<key>.jsonl（目录启动时自动建）
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -279,13 +280,15 @@ try {
   fs.rmSync(envDir, { recursive: true, force: true });
 
   // 12. 多 bot：另起一个进程，两个 bot（default 用 BOT_ID，test 用 BOT2_ID），test 有自己的 token，顶层是管理员 token
-  multiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-multi-'));
+  // realpath：macOS 的 tmpdir 是软链，子进程 process.cwd() 返回的是真实路径，不统一的话 msg_log 重名校验对不上
+  multiDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-multi-')));
   const mPort = await new Promise((r) => { const srv = net.createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => r(p)); }); });
   const ADMIN_TOKEN = 'multi-admin-token', TEST_TOKEN = 'multi-test-token';
-  const mLogDefault = path.join(multiDir, 'messages.jsonl'), mLogTest = path.join(multiDir, 'messages.test.jsonl');
+  // 两个 bot 都不写 msg_log，走默认路径
+  const mLogDefault = path.join(multiDir, 'messages', 'messages.default.jsonl'), mLogTest = path.join(multiDir, 'messages', 'messages.test.jsonl');
   const mBots = [
-    { key: 'default', bot_id: BOT_ID, secret: SECRET, msg_log: mLogDefault },
-    { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN, msg_log: mLogTest },
+    { key: 'default', bot_id: BOT_ID, secret: SECRET },
+    { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN },
   ];
   const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, bots: mBots, ...over });
   const mCfgFile = path.join(multiDir, 'config.json');
@@ -296,6 +299,10 @@ try {
   const mConn = (id) => conns.find((c) => c.path === '/multi' && c.botId === id);
   await waitFor(() => mConn(BOT_ID) && mConn(BOT2_ID), 8000);
   check(conns.filter((c) => c.path === '/multi' && c.botId).length === 2, '多 bot：两个 bot 各自一条连接，订阅帧的 bot_id 各自正确');
+  // 还没收到任何消息：messages/ 目录得在启动时就建好，否则订阅成功时写 .alive 会静默失败
+  await waitFor(() => fs.existsSync(mLogDefault + '.alive') && fs.existsSync(mLogTest + '.alive'), 3000).catch(() => {});
+  check(fs.existsSync(mLogDefault + '.alive') && fs.existsSync(mLogTest + '.alive') && !fs.existsSync(mLogDefault) && !/写游标失败|写消息日志失败/.test(multiOut),
+    '默认路径：收消息前 messages/ 下已写出两个 bot 的 .alive，无写文件报错', fs.existsSync(path.join(multiDir, 'messages')) ? fs.readdirSync(path.join(multiDir, 'messages')).join(',') : 'messages/ 不存在');
 
   const mBase = `http://127.0.0.1:${mPort}`;
   const mj = async (p, token, headers = {}) => { const r = await fetch(mBase + p, { headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers } }); return { status: r.status, body: await r.json() }; };
@@ -338,6 +345,9 @@ try {
   // client 零改动：api_base 带 /bots/test，拿 test 的消息、推进 test 的游标；default 那边有一条消息，游标不该动
   await mPush(BOT2_ID, 'MSG-T2');
   await mPush(BOT_ID, 'MSG-D1');
+  const rootLeft = fs.readdirSync(multiDir).filter((f) => /^messages.*\.jsonl/.test(f));
+  check(readLog(mLogDefault).includes('MSG-D1') && readLog(mLogTest).includes('MSG-T2') && rootLeft.length === 0,
+    '默认路径：不写 msg_log 时落到 messages/messages.default.jsonl 和 messages/messages.test.jsonl，工作目录根下没有消息文件', rootLeft.join(',') || '根目录干净');
   const mcdir = fs.mkdtempSync(path.join(multiDir, 'client-'));
   for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(mcdir, f));
   const mRun = (script, ...a) => {

@@ -66,7 +66,31 @@ scp server/index.mjs <vps>:/opt/wecom-bot/index.mjs
 ssh <vps> 'sudo systemctl restart wecom-bot && sleep 5 && journalctl -u wecom-bot -n 15 --no-pager'
 ```
 
-日志里应有「消息存储已加载」和「订阅成功」。`messages.jsonl`、`.state.json`、`.alive` 都保留，seq 和游标接着走。
+日志里应有「消息存储已加载」和「订阅成功」。`messages/` 下的 `messages.default.jsonl`、`.state.json`、`.alive` 都保留，seq 和游标接着走。
+
+### 从 v0.2.x 升级：消息文件搬进 messages/ 目录
+
+v0.2.x 的数据文件在部署目录根下（`messages.jsonl`、`messages.<key>.jsonl` 及各自的 `.state.json` / `.alive`），新版本默认改到 `messages/messages.<key>.jsonl`，**不认旧位置**。不搬的话网关会从 seq 0 重新开始，agent 的游标也对不上。
+
+1. 在宝塔面板（或你的进程管理器）里**停止**网关。必须先停：旧进程每写一次都会按旧路径把文件重新建出来。
+2. 在部署目录下搬文件（文件不存在就跳过，`mv -n` 不覆盖已有文件）：
+
+   ```bash
+   cd <部署目录> && mkdir -p messages
+   for s in '' .state.json .alive; do
+     [ -e "messages.jsonl$s" ] && mv -n "messages.jsonl$s" "messages/messages.default.jsonl$s"
+   done
+   for f in messages.*.jsonl*; do
+     [ -e "$f" ] && mv -n "$f" messages/
+   done
+   ls -la messages/ && ls messages.* 2>/dev/null
+   ```
+
+   最后一行应只列出 `messages/` 里的文件；根目录还剩 `messages.*` 说明 `messages/` 里已有同名文件（比如新版本已先跑过一次），`mv -n` 跳过了，要手工比对后处理。
+3. 上传新的 `index.mjs`。
+4. 启动网关，日志里「消息存储已加载」的条数和 seq 应和停机前一致。
+
+`config.json` 里显式写了 `msg_log` 的，网关仍按那个路径走、不受这次改动影响；想用新位置就删掉那一项或改成新路径。
 
 `wecom-bot.service` 有变化时（看 CHANGELOG），多做一步 `sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload`。`package.json` 依赖有变化时再跑一次 `npm i`。
 
@@ -75,7 +99,7 @@ ssh <vps> 'sudo systemctl restart wecom-bot && sleep 5 && journalctl -u wecom-bo
 多个机器人跑在同一个进程里，共用一个端口和反代，接口用前缀 `/bots/<key>/` 区分（见 [api.md § 多 bot 路由](api.md#多-bot-路由)）。
 
 1. 企微后台再建一个智能机器人，同样开 API 模式、选长连接，记下它的 Bot ID 和 Secret。
-2. 编辑 VPS 上的 `config.json`，在 `bots` 里加一项，写上 `key`（如 `sales`）、`bot_id`、`secret`，以及给接这个机器人的 agent 用的 `api_token`（`openssl rand -hex 32`，不能和 `http.api_token` 或别的 bot 相同）。原来那个机器人要是还没写 `key`，补上 `"key": "default"`，它的数据文件仍是 `messages.jsonl`，不用迁移。字段说明见 [config.md § 配置多个机器人](config.md#配置多个机器人)。
+2. 编辑 VPS 上的 `config.json`，在 `bots` 里加一项，写上 `key`（如 `sales`）、`bot_id`、`secret`，以及给接这个机器人的 agent 用的 `api_token`（`openssl rand -hex 32`，不能和 `http.api_token` 或别的 bot 相同）。原来那个机器人要是还没写 `key`，补上 `"key": "default"`，它的数据文件是 `messages/messages.default.jsonl`。字段说明见 [config.md § 配置多个机器人](config.md#配置多个机器人)。
 3. 重启：`sudo systemctl restart wecom-bot`。**所有机器人都会有几秒空窗**，挑没人用的时候做。日志里每个机器人各有一行 `[<key>] 订阅成功，开始心跳`。
 4. 接这个机器人的客户端，`client/config.json` 的 `api_base` 填 `https://your-domain.example.com/bots/<key>`，`api_token` 填第 2 步那个 token。客户端代码不用改。
 
@@ -104,19 +128,19 @@ require("fs").writeFileSync("config.json",JSON.stringify(c,null,2));' && chmod 6
 
 配了 `admin_userid` 后，每次重连成功，网关会给这个人发一条：离线了多少秒、起止时间、原因是「连接中断」还是「进程重启」，提醒期间的消息已丢需要重发。
 
-- 进程重启的空窗靠 `messages.jsonl.alive` 推算：心跳每 30 秒写一次当前时刻，下次启动读它。所以 VPS 整机宕机也能报出来。
+- 进程重启的空窗靠 `messages/messages.<key>.jsonl.alive` 推算：心跳每 30 秒写一次当前时刻，下次启动读它。所以 VPS 整机宕机也能报出来。
 - 短于 `outage_min_secs`（3 秒）不报；抖动时最多每 `outage_report_min_ms`（1 分钟）报一次。
-- 被另一处连接踢下线时，`messages.jsonl` 里会多一条 `eventtype: disconnected_event` 的事件，看到它说明有两处在跑同一个机器人。
+- 被另一处连接踢下线时，`messages/messages.<key>.jsonl` 里会多一条 `eventtype: disconnected_event` 的事件，看到它说明有两处在跑同一个机器人。
 
 ## 数据文件
 
-都在 `msg_log` 旁边（默认工作目录）。多个机器人时，key 不是 `default` 的那些文件名是 `messages.<key>.jsonl` 及其 `.state.json` / `.alive`：
+都在 `msg_log` 旁边（默认工作目录下的 `messages/`）。下表以单 bot 为例；多个机器人时每个 bot 一组，文件名是 `messages/messages.<key>.jsonl` 及其 `.state.json` / `.alive`：
 
 | 文件 | 内容 | 能不能删 |
 |---|---|---|
-| `messages.jsonl` | 全部消息与事件，一行一条，只追加 | 删了 seq 从 0 重来，历史丢失 |
-| `messages.jsonl.state.json` | 游标、处理端最后露面时刻与 id | 删了游标归零，agent 会重拉全部历史 |
-| `messages.jsonl.alive` | 最后一次心跳的时刻 | 可以删，只影响下一次断线自报 |
+| `messages/messages.default.jsonl` | 全部消息与事件，一行一条，只追加 | 删了 seq 从 0 重来，历史丢失 |
+| `messages/messages.default.jsonl.state.json` | 游标、处理端最后露面时刻与 id | 删了游标归零，agent 会重拉全部历史 |
+| `messages/messages.default.jsonl.alive` | 最后一次心跳的时刻 | 可以删，只影响下一次断线自报 |
 
 启动时整份文件读进内存；运行中内存超过 10000 条后，每来一条新的就丢掉内存里最早的一条（文件里仍在，但 `/messages` 查不到，重启后又能查到）。文件目前不做轮转，长期运行可自行按月归档（先停服务）。
 

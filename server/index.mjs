@@ -139,8 +139,8 @@ function normalizeConfig(raw, source) {
     seenKeys.add(key);
     if (!b.bot_id) errs.push(`${at}: 缺少 bot_id`);
     if (!b.secret) errs.push(`${at}: 缺少 secret`);
-    // 默认数据文件：default 用 messages.jsonl，和历史部署完全一致（零迁移）
-    const msgLog = b.msg_log ?? path.join(process.cwd(), key === 'default' ? 'messages.jsonl' : `messages.${key}.jsonl`);
+    // 默认数据文件：统一放 messages/ 目录，按 key 命名（default 也一样）
+    const msgLog = b.msg_log ?? path.join(process.cwd(), 'messages', `messages.${key}.jsonl`);
     return {
       key,
       botId: b.bot_id || '',
@@ -226,6 +226,10 @@ class MessageStore {
     this.cursor = 0;
     this.loadedState = {};   // 游标之外的字段（presence）由 Bot 取用
     this.extraState = () => ({}); // Bot 注入：和 cursor 一起写进 .state.json
+    // .state.json 和 .alive 用 writeFileSync 直接写，不会自己建目录；启动时先建好
+    if (this.file) {
+      try { fs.mkdirSync(path.dirname(this.file), { recursive: true }); } catch (e) { this.L.warn('创建消息目录失败:', e.message); }
+    }
     this.load();
   }
   load() {

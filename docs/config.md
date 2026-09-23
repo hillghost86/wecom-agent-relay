@@ -41,7 +41,7 @@
 | `reply_text_offline` | 否 | `已收到。处理端已离线 {duration}，上线后会处理` | 处理端离线时的秒回文案，`{duration}` 替换成实际离线时长 |
 | `admin_userid` | 否 | 空 | 收断线自报和离线告警的人的 userid。不填就不发 |
 | `offline_alert_mins` | 否 | `0` | 处理端离线超过这么多分钟且有积压就给管理员发告警，`0` 关闭。默认关，因为处理端那台电脑每晚休眠就会每晚报一次 |
-| `msg_log` | 否 | `<工作目录>/messages.jsonl`（key 不是 `default` 时为 `messages.<key>.jsonl`） | 消息落盘文件，两个 bot 不能指向同一个文件。`"off"` 只放内存（重启即丢，别在生产用）。旁边会生成 `.state.json`（游标 + 在线状态）和 `.alive`（心跳时间戳，用来推算进程重启空窗） |
+| `msg_log` | 否 | `<工作目录>/messages/messages.<key>.jsonl`（单 bot 即 `messages/messages.default.jsonl`；`messages/` 目录启动时自动建） | 消息落盘文件，两个 bot 不能指向同一个文件。`"off"` 只放内存（重启即丢，别在生产用）。旁边会生成 `.state.json`（游标 + 在线状态）和 `.alive`（心跳时间戳，用来推算进程重启空窗） |
 
 ### 两级 token
 
@@ -65,7 +65,7 @@
 ```
 
 - 多于一个 bot 时每个都必须写 `key`。
-- 数据文件按 key 分开：`default` 用 `messages.jsonl`（和单 bot 时一样），`sales` 用 `messages.sales.jsonl`。
+- 数据文件按 key 分开：`default` 用 `messages/messages.default.jsonl`（和单 bot 时一样），`sales` 用 `messages/messages.sales.jsonl`。
 - 断线自报、离线告警、秒回文案都按 bot 各自配置、各自发送。
 - 日志每行前面会带 `[<key>]`；只有一个 bot 时不带，和以前一样。
 - 所有 bot 在同一个进程里，重启时一起有几秒空窗。加机器人的步骤见 [deploy.md § 加一个机器人](deploy.md#加一个机器人)。

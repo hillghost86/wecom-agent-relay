@@ -10,7 +10,7 @@
 企微服务器
    │ wss 长连接（30s 心跳 · 断线自动重连）
    ▼
-VPS 网关 server/（7×24 在线，唯一持久层 messages.jsonl）
+VPS 网关 server/（7×24 在线，唯一持久层 messages/messages.<key>.jsonl）
    │ HTTPS API：/health /messages /messages/<seq> /ack /send（多 bot 时加前缀 /bots/<key>/）
    ▼
 本机 client/
