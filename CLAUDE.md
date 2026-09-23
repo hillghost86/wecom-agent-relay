@@ -86,6 +86,17 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 | `~/.config/wecom-agent-relay/admin.json` | `api_base` + 管理员 token | 对生产做只读检查（`/health` `/bots`），不带 `X-Relay-Agent` |
 | `client/config.json` | `api_base` 带 `/bots/test` + 测试 bot 自己的 token + `agent_id: mac-claude` | 用测试 bot 测客户端功能 |
 
+`admin.json` 只给只读检查用，项目代码不读它。格式（`chmod 600`，所在目录 `chmod 700`）：
+
+```json
+{
+  "api_base": "https://your-domain.example.com",
+  "api_token": "<服务端 config.json 里的 http.api_token>"
+}
+```
+
+管理员 token 换了之后要同步改这个文件。
+
 `server/` 目录下不放真实 `config.json`：服务端默认读工作目录的 `config.json`，放一份生产配置在这里，随手 `node index.mjs` 就会踢掉 VPS 上的生产连接。
 
 ## 代码规范
