@@ -8,6 +8,9 @@
 ### 变更
 - **默认消息文件位置改为 `bots/<key>/messages.jsonl`**（单 bot 即 `bots/default/messages.jsonl`，`.state.json` / `.alive` 跟着进同一目录，目录启动时自动建；同目录下的 `files/` 预留给以后的媒体下载）。**不兼容旧位置，升级前必须按 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级数据文件搬进-botskey) 手工搬移，否则网关会从 seq 0 重新开始。** 显式写了 `msg_log` 的配置不受影响。
 
+### 修复
+- `msg_log` 写成空字符串（`"msg_log": ""`）时，网关把它当成 `"off"`，消息只放内存、不打任何提示，重启后数据全无。现在空字符串或只有空白等同于没写，走默认路径 `bots/<key>/messages.jsonl`；环境变量 `MSG_LOG=""` 同样生效。`"off"` 行为不变，但启动时会打一条警告（多 bot 时带 `[<key>]` 前缀）。
+
 ### 新增
 - **多 bot**：`server/config.json` 的 `bots` 可以配多个机器人（每个必须有 `key`），同一个进程里每个 bot 各自一条连接、各自的数据文件（`bots/<key>/messages.jsonl`，见上面「变更」）、游标、在线状态、断线自报和离线告警。两个 bot 的 `msg_log` 指向同一个文件时拒绝启动。
 - **前缀路由**：所有接口可加前缀 `/bots/<key>/`（如 `/bots/sales/messages`）；不带前缀的老路径指向 `bots` 里第一个，老客户端不用改。客户端接某个 bot 只需把 `api_base` 填成 `…/bots/<key>`，`client/` 代码未改。
@@ -20,7 +23,7 @@
 - `docs/config.md` 加 `bots[].api_token`、两级 token 与多机器人配置示例；`docs/api.md` 加「多 bot 路由」与 `GET /bots`；`docs/deploy.md` 加「加一个机器人」；`docs/presence.md`、`docs/roadmap.md`、`docs/agent-integration.md`、`server/README.md`、根 README 同步。`server/config.example.json` 的 `bots[0]` 加空的 `api_token`（留空即只用管理员 token）。
 
 ### 测试
-- `test_mock.mjs` 从 39 项扩到 59 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀。
+- `test_mock.mjs` 从 39 项扩到 61 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀；另加 `msg_log` 空字符串走默认路径、`"off"` 启动警告两项。
 
 ## v0.2.1 — 2026-09-24
 

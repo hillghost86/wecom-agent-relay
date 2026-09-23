@@ -9,10 +9,10 @@
  *   7. HTTP API：/health、/messages、/ack 游标、鉴权、/send 透传
  *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数、只有事件时不唤醒、pending 不计事件
  *   9. presence：X-Relay-Agent 记在线、/health 带出状态、离线时自动回复分档、管理员离线告警
- *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载
+ *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载、msg_log=off 启动警告
  *  12. 多 bot：另起一个两 bot 的服务端进程，验证各自连接与落盘、/bots/<key>/ 前缀路由、两级 token（401/403/404）、
  *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀、
- *      不写 msg_log 时默认落到工作目录下 bots/<key>/messages.jsonl（目录启动时自动建）
+ *      不写 msg_log 时默认落到工作目录下 bots/<key>/messages.jsonl（目录启动时自动建）、msg_log 为空串等同于没写
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -276,6 +276,7 @@ try {
   let envOk = true;
   try { await waitFor(() => conns.length > connsBefore && conns[connsBefore].frames.some((f) => f.cmd === 'aibot_subscribe'), 8000); } catch { envOk = false; }
   check(envOk && /环境变量方式将在下个版本移除/.test(envOut), '无 config.json 时从环境变量兼容加载并给出迁移警告', envOut.split('\n').find((l) => /环境变量/.test(l)) || envOut.slice(0, 200));
+  check(/msg_log=off：消息只放内存，重启即丢，不要在生产使用/.test(envOut), 'msg_log=off（MSG_LOG=off）时启动打印只放内存的警告', envOut.split('\n').find((l) => /msg_log=off/.test(l)) || '无警告');
   envChild.kill('SIGTERM');
   fs.rmSync(envDir, { recursive: true, force: true });
 
@@ -284,10 +285,10 @@ try {
   multiDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-multi-')));
   const mPort = await new Promise((r) => { const srv = net.createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => r(p)); }); });
   const ADMIN_TOKEN = 'multi-admin-token', TEST_TOKEN = 'multi-test-token';
-  // 两个 bot 都不写 msg_log，走默认路径
+  // default 写空串、test 不写，都应走默认路径（空串曾被当成 off，静默不存盘）
   const mLogDefault = path.join(multiDir, 'bots', 'default', 'messages.jsonl'), mLogTest = path.join(multiDir, 'bots', 'test', 'messages.jsonl');
   const mBots = [
-    { key: 'default', bot_id: BOT_ID, secret: SECRET },
+    { key: 'default', bot_id: BOT_ID, secret: SECRET, msg_log: '' },
     { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN },
   ];
   const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, bots: mBots, ...over });
@@ -349,6 +350,7 @@ try {
   const msgDirLeft = fs.existsSync(path.join(multiDir, 'messages')) ? fs.readdirSync(path.join(multiDir, 'messages')) : [];
   check(readLog(mLogDefault).includes('MSG-D1') && readLog(mLogTest).includes('MSG-T2') && rootLeft.length === 0 && msgDirLeft.length === 0,
     '默认路径：不写 msg_log 时落到 bots/default/messages.jsonl 和 bots/test/messages.jsonl，根目录和 messages/ 下都没有消息文件', [...rootLeft, ...msgDirLeft].join(',') || '根目录与 messages/ 干净');
+  check(readLog(mLogDefault).includes('MSG-D1') && !/msg_log=off/.test(multiOut), 'msg_log 为空串时按没写处理：落到 bots/default/messages.jsonl，不当成 off');
   const mcdir = fs.mkdtempSync(path.join(multiDir, 'client-'));
   for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(mcdir, f));
   const mRun = (script, ...a) => {

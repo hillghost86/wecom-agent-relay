@@ -41,7 +41,7 @@
 | `reply_text_offline` | 否 | `已收到。处理端已离线 {duration}，上线后会处理` | 处理端离线时的秒回文案，`{duration}` 替换成实际离线时长 |
 | `admin_userid` | 否 | 空 | 收断线自报和离线告警的人的 userid。不填就不发 |
 | `offline_alert_mins` | 否 | `0` | 处理端离线超过这么多分钟且有积压就给管理员发告警，`0` 关闭。默认关，因为处理端那台电脑每晚休眠就会每晚报一次 |
-| `msg_log` | 否 | `<工作目录>/bots/<key>/messages.jsonl`（单 bot 即 `bots/default/messages.jsonl`；目录启动时自动建） | 消息落盘文件，两个 bot 不能指向同一个文件。`"off"` 只放内存（重启即丢，别在生产用）。旁边会生成 `.state.json`（游标 + 在线状态）和 `.alive`（心跳时间戳，用来推算进程重启空窗） |
+| `msg_log` | 否 | `<工作目录>/bots/<key>/messages.jsonl`（单 bot 即 `bots/default/messages.jsonl`；目录启动时自动建） | 消息落盘文件，两个 bot 不能指向同一个文件。空字符串（或只有空白）等同于没写，走默认路径。`"off"` 只放内存（重启即丢，别在生产用），启动时会打一条警告。旁边会生成 `.state.json`（游标 + 在线状态）和 `.alive`（心跳时间戳，用来推算进程重启空窗） |
 
 ### 两级 token
 

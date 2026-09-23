@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 59 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
+node test_mock.mjs                       # 必做：起假网关跑 61 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
 node index.mjs --config <路径>           # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
 
 # —— 只读检查生产（管理员 token，不带 X-Relay-Agent 头）——
