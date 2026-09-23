@@ -83,7 +83,7 @@ cp -r wecom-agent-relay/skill/wecom-agent-relay ~/.workbuddy/skills/
 
 ### 2. 部署 VPS 网关
 
-见 [server/README.md](server/README.md)。核心：`server/index.mjs` 以 systemd 常驻，
+见 [server/README.md](server/README.md)。核心：`server/`（入口 `src/index.mjs`）以 systemd 常驻，
 配置走 `config.json`（从 `server/config.example.json` 复制）：`bot_id` / `secret` /
 `http.api_token`（`openssl rand -hex 32` 自生成）必填，`admin_userid` 填一个 userid 可收到断线自报。
 

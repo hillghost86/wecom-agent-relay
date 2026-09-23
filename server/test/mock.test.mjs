@@ -1,5 +1,5 @@
 /**
- * 协议自测：起一个模拟企微网关，拉起 index.mjs，验证
+ * 协议自测：起一个模拟企微网关，拉起 src/index.mjs，验证
  *   1. 订阅帧带正确 bot_id/secret，并处理 errcode=0 回包
  *   2. 心跳 ping 定期到达
  *   3. 推 aibot_msg_callback 后，5 秒内收到同 req_id 的 aibot_respond_msg（finish=true）
@@ -61,7 +61,7 @@ wss.on('connection', (ws, req) => {
 });
 
 fs.writeFileSync(tmpLog + '.alive', String(Date.now() - 120000)); // 伪造上次在线时刻：120s 前
-const serverDir = new URL('.', import.meta.url).pathname;
+const serverDir = new URL('..', import.meta.url).pathname;
 const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-cfg-'));
 const cfgFile = path.join(cfgDir, 'config.json');
 fs.writeFileSync(cfgFile, JSON.stringify({
@@ -73,7 +73,7 @@ fs.writeFileSync(cfgFile, JSON.stringify({
   agent_online_secs: 1,          // 1 秒没露面就算处理端离线，便于测分档回复
   bots: [{ bot_id: BOT_ID, secret: SECRET, reply_text: '已收到', admin_userid: 'admin1', msg_log: tmpLog, offline_alert_mins: 0.01 }],
 }, null, 2));
-const child = spawn(process.execPath, ['index.mjs', '--config', cfgFile], {
+const child = spawn(process.execPath, ['src/index.mjs', '--config', cfgFile], {
   cwd: serverDir,
   env: { ...process.env },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -181,7 +181,7 @@ try {
   // 8. client/ 脚本：复制到临时目录跑，避免在仓库里生成 sentinel_cursor.json
   const { execFileSync } = await import('node:child_process');
   const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-client-'));
-  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(cdir, f));
+  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../../client/${f}`, import.meta.url), path.join(cdir, f));
   const runClient = (script, ...a) => {
     try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: API_TOKEN, WECOM_AGENT_ID: 'test-agent' }, encoding: 'utf-8', timeout: 10000 }); }
     catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
@@ -259,13 +259,13 @@ try {
   const { spawnSync } = await import('node:child_process');
   const badCfg = path.join(cfgDir, 'bad-config.json');
   fs.writeFileSync(badCfg, JSON.stringify({ http: { port: 0 }, bots: [] }));
-  const badRun = spawnSync(process.execPath, ['index.mjs', '--config', badCfg], { cwd: serverDir, encoding: 'utf-8', timeout: 5000 });
+  const badRun = spawnSync(process.execPath, ['src/index.mjs', '--config', badCfg], { cwd: serverDir, encoding: 'utf-8', timeout: 5000 });
   check(badRun.status !== 0 && /bots/.test(badRun.stderr || ''), '配置非法（bots 为空）时非 0 退出并打印原因', `exit=${badRun.status} ${(badRun.stderr || '').trim().split('\n')[0]}`);
 
   // 11. 兼容期：没有 config.json 时从环境变量加载（ws_url 也走环境变量，否则只能连真实网关）
   const envDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-env-'));
   const connsBefore = conns.length;
-  const envChild = spawn(process.execPath, [path.join(serverDir, 'index.mjs')], {
+  const envChild = spawn(process.execPath, [path.join(serverDir, 'src', 'index.mjs')], {
     cwd: envDir,
     env: { ...process.env, WECOM_BOT_ID: BOT_ID, WECOM_BOT_SECRET: SECRET, WECOM_WS_URL: `ws://127.0.0.1:${port}`, HTTP_PORT: '0', MSG_LOG: 'off' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -294,7 +294,7 @@ try {
   const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, bots: mBots, ...over });
   const mCfgFile = path.join(multiDir, 'config.json');
   fs.writeFileSync(mCfgFile, JSON.stringify(mCfg(), null, 2));
-  multiChild = spawn(process.execPath, [path.join(serverDir, 'index.mjs'), '--config', mCfgFile], { cwd: multiDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  multiChild = spawn(process.execPath, [path.join(serverDir, 'src', 'index.mjs'), '--config', mCfgFile], { cwd: multiDir, stdio: ['ignore', 'pipe', 'pipe'] });
   multiChild.stdout.on('data', (d) => { multiOut += d; });
   multiChild.stderr.on('data', (d) => { multiOut += d; });
   const mConn = (id) => conns.find((c) => c.path === '/multi' && c.botId === id);
@@ -352,7 +352,7 @@ try {
     '默认路径：不写 msg_log 时落到 bots/default/messages.jsonl 和 bots/test/messages.jsonl，根目录和 messages/ 下都没有消息文件', [...rootLeft, ...msgDirLeft].join(',') || '根目录与 messages/ 干净');
   check(readLog(mLogDefault).includes('MSG-D1') && !/msg_log=off/.test(multiOut), 'msg_log 为空串时按没写处理：落到 bots/default/messages.jsonl，不当成 off');
   const mcdir = fs.mkdtempSync(path.join(multiDir, 'client-'));
-  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(mcdir, f));
+  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../../client/${f}`, import.meta.url), path.join(mcdir, f));
   const mRun = (script, ...a) => {
     try { return execFileSync(process.execPath, [path.join(mcdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: `${mBase}/bots/test`, WECOM_API_TOKEN: TEST_TOKEN, WECOM_AGENT_ID: 't-agent' }, encoding: 'utf-8', timeout: 10000 }); }
     catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
@@ -374,7 +374,7 @@ try {
   for (const [label, cfg, re] of badCases) {
     const f = path.join(multiDir, 'bad.json');
     fs.writeFileSync(f, JSON.stringify(cfg));
-    const r = spawnSync(process.execPath, [path.join(serverDir, 'index.mjs'), '--config', f], { cwd: multiDir, encoding: 'utf-8', timeout: 5000 });
+    const r = spawnSync(process.execPath, [path.join(serverDir, 'src', 'index.mjs'), '--config', f], { cwd: multiDir, encoding: 'utf-8', timeout: 5000 });
     check(r.status !== 0 && re.test(r.stderr || ''), `多 bot 配置校验：${label}时启动失败`, `exit=${r.status} ${(r.stderr || '').trim().split('\n').pop()}`);
   }
 

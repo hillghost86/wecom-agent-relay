@@ -45,7 +45,7 @@ cp client/config.example.json client/config.json
 
 详细步骤见仓库 `server/README.md`。要点：
 
-1. 上传 `server/`（index.mjs、package.json、config.example.json、wecom-bot.service）到 VPS `/opt/wecom-bot`
+1. 上传 `server/`（package.json、整个 src/ 目录、config.example.json、wecom-bot.service）到 VPS `/opt/wecom-bot`，上传后确认文件属主和运行用户一致
 2. `cp config.example.json config.json`，填四个值：`bot_id`、`secret`、`http.api_token`（`openssl rand -hex 32` 生成）、`admin_userid`（收断线自报的人）；然后 `chmod 600 config.json`。systemd 单元的 `ExecStart` 已经带 `--config /opt/wecom-bot/config.json`，不用再配环境变量
 3. `npm i`，装 systemd 单元：`sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」
 4. nginx/Caddy 把域名反代到 `http://127.0.0.1:8788` 并配 HTTPS

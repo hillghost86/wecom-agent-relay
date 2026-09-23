@@ -4,8 +4,8 @@
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
-    "start": "node index.mjs",
-    "test": "node test_mock.mjs"
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

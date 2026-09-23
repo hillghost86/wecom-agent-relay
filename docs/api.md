@@ -1,6 +1,6 @@
 # HTTP API 参考
 
-VPS 网关（`server/index.mjs`）在 `127.0.0.1:8788` 上提供的接口。对外的 HTTPS 地址由反代给出，下文用 `$BOT_API` 代指，token 用 `$BOT_TOKEN`。
+VPS 网关（`server/src/index.mjs`，接口实现在 `server/src/http/`）在 `127.0.0.1:8788` 上提供的接口。对外的 HTTPS 地址由反代给出，下文用 `$BOT_API` 代指，token 用 `$BOT_TOKEN`。
 
 ## 鉴权与公共约定
 

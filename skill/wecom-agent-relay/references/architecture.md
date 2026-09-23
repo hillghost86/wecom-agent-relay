@@ -6,7 +6,7 @@
 企微服务器
    │ wss 长连接（aibot_subscribe 鉴权，30s 心跳，断线自动重连）
    ▼
-VPS 网关（server/index.mjs，systemd 常驻）
+VPS 网关（server/src/index.mjs，systemd 常驻）
    │ 收到 aibot_msg_callback → 毫秒级追加 bots/<key>/messages.jsonl
    │ HTTPS API：/health /messages /messages/<seq> /ack /send（Bearer API_TOKEN）
    ▼

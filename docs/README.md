@@ -19,16 +19,16 @@
 
 | 功能 | 在哪实现 | 文档 |
 |---|---|---|
-| 连企微长连接、心跳、断线重连 | `server/index.mjs` `BotConnection` | [protocol.md](protocol.md) |
-| 消息落盘、seq、游标 | `server/index.mjs` `MessageStore` | [api.md § 消息记录格式](api.md#消息记录格式) |
-| 秒回「已收到」/ 离线文案 | `server/index.mjs` `replyTextNow` | [presence.md](presence.md) |
-| 断线自报（重连后告诉管理员离线了多久） | `server/index.mjs` `reportOutage` | [deploy.md § 断线自报](deploy.md#断线自报) |
-| 管理员离线告警 | `server/index.mjs` `startOfflineAlert` | [presence.md § 管理员离线告警](presence.md#管理员离线告警) |
-| HTTP API 与鉴权 | `server/index.mjs` `startHttpServer` | [api.md](api.md) |
+| 连企微长连接、心跳、断线重连 | `server/src/wecom.mjs` `BotConnection` | [protocol.md](protocol.md) |
+| 消息落盘、seq、游标 | `server/src/store.mjs` `MessageStore` | [api.md § 消息记录格式](api.md#消息记录格式) |
+| 秒回「已收到」/ 离线文案 | `server/src/wecom.mjs` `replyTextNow` | [presence.md](presence.md) |
+| 断线自报（重连后告诉管理员离线了多久） | `server/src/wecom.mjs` `reportOutage`（空窗与节流）、`server/src/notify.mjs` `sendOutageReport`（内容与发送） | [deploy.md § 断线自报](deploy.md#断线自报) |
+| 管理员离线告警 | `server/src/notify.mjs` `startOfflineAlert` | [presence.md § 管理员离线告警](presence.md#管理员离线告警) |
+| HTTP API 与鉴权 | `server/src/http/`：`server.mjs` `startHttpServer`（路由）、`auth.mjs`（鉴权判定）、`api.mjs`（各接口） | [api.md](api.md) |
 | 哨兵（发现新消息即退出） | `client/sentinel.mjs` | [agent-integration.md](agent-integration.md) |
 | 拉取 / 回复 / 推送 / ack 命令行 | `client/poll.mjs` | [agent-integration.md § poll.mjs](agent-integration.md#pollmjs-命令) |
 | WorkBuddy 一句话安装 | `skill/wecom-agent-relay/SKILL.md` | 技能包自带 |
-| 假网关自测 | `server/test_mock.mjs` | [deploy.md § 自测](deploy.md#自测) |
+| 假网关自测 | `server/test/mock.test.mjs` | [deploy.md § 自测](deploy.md#自测) |
 
 ## 文档分工
 

@@ -8,7 +8,7 @@
 
 1. 企微后台 → 管理工具 → 智能机器人 → 开启 API 模式 → 连接方式选「长连接」，记下 Bot ID 和 Secret（Secret 只显示一次）。
 2. VPS 装 Node ≥ 18。
-3. 上传 `server/` 下的 `index.mjs`、`package.json`、`config.example.json`、`wecom-bot.service` 到 `/opt/wecom-bot/`。
+3. 上传 `server/` 下的 `package.json`、整个 `src/` 目录、`config.example.json`、`wecom-bot.service` 到 `/opt/wecom-bot/`（`src/` 保持原目录结构）。上传后确认文件属主和运行网关的用户一致。
 4. 在 VPS 上：
 
 ```bash
@@ -59,14 +59,22 @@ location / {
 
 ## 升级
 
-大多数升级只换 `index.mjs`：
+大多数升级只换 `package.json` 和 `src/` 目录：
 
 ```bash
-scp server/index.mjs <vps>:/opt/wecom-bot/index.mjs
+scp -r server/package.json server/src <vps>:/opt/wecom-bot/
 ssh <vps> 'sudo systemctl restart wecom-bot && sleep 5 && journalctl -u wecom-bot -n 15 --no-pager'
 ```
 
-日志里应有「消息存储已加载」和「订阅成功」。`bots/default/` 下的 `messages.jsonl`、`.state.json`、`.alive` 都保留，seq 和游标接着走。
+上传后确认文件属主和运行网关的用户一致。日志里应有「消息存储已加载」和「订阅成功」。`bots/default/` 下的 `messages.jsonl`、`.state.json`、`.alive` 都保留，seq 和游标接着走。
+
+### 从单文件版本升级：入口改为 `src/index.mjs`
+
+以前服务端只有部署目录根下的一个 `index.mjs`，现在拆成了 `src/` 下的多个模块，入口是 `src/index.mjs`，行为不变。
+
+1. 按上面的命令上传 `package.json` 和整个 `src/`。旧的根目录 `index.mjs` 已不再使用，可以删掉。
+2. 用 systemd 的：单元文件的 `ExecStart` 改成了 `node src/index.mjs --config …`，上传新的 `wecom-bot.service` 后 `sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload`，再重启。
+   用宝塔「Node 项目」或其他按 `npm start` 启动的：`package.json` 的 `start` 已指向 `src/index.mjs`，启动命令不用改；如果当初填的是 `node index.mjs`，改成 `npm start` 或 `node src/index.mjs`。
 
 ### 从 v0.2.x 升级：数据文件搬进 `bots/<key>/`
 
@@ -89,7 +97,7 @@ v0.2.x 的数据文件在部署目录根下（`messages.jsonl`、`messages.<key>
    ```
 
    最后一行应只列出 `bots/` 下各目录的文件；根目录还剩 `messages.*` 说明 `bots/<key>/` 里已有同名文件（比如新版本已先跑过一次），`mv -n` 跳过了，要手工比对后处理。
-3. 上传新的 `index.mjs`。
+3. 上传新的 `package.json` 和 `src/` 目录（见上文「升级」）。
 4. 启动网关，日志里「消息存储已加载」的条数和 seq 应和停机前一致。
 
 `config.json` 里显式写了 `msg_log` 的，网关仍按那个路径走、不受这次改动影响；想用新位置就删掉那一项或改成新路径。
@@ -149,12 +157,12 @@ require("fs").writeFileSync("config.json",JSON.stringify(c,null,2));' && chmod 6
 ## 自测
 
 ```bash
-cd server && node test_mock.mjs
+cd server && npm test      # 即 node --test 跑 test/mock.test.mjs；也可直接 node test/mock.test.mjs
 ```
 
 起一个假的企微网关，把服务端和两个客户端脚本整套跑一遍（协议、HTTP API、断线自报、presence、配置加载、哨兵只对真消息唤醒）。不连真网关、不需要任何凭证。改了代码必跑。
 
 ## 注意
 
-- **一个机器人同一时刻只能有一条连接**，新的踢旧的。本地调试时别和 VPS 同时跑 `index.mjs`。
+- **一个机器人同一时刻只能有一条连接**，新的踢旧的。本地调试时别和 VPS 同时跑 `src/index.mjs`。
 - 本地要跑真连接，先停 VPS 上的服务，调完再起来，并接受这段时间的消息会丢。

@@ -12,7 +12,7 @@
 ```bash
 npm i
 cp config.example.json config.json   # 填 bot_id、secret、http.api_token（openssl rand -hex 32）、admin_userid（收断线通知的人）
-node index.mjs                       # 默认读工作目录下的 config.json；别的位置用 --config <路径>
+npm start                            # 即 node src/index.mjs；默认读工作目录下的 config.json，别的位置用 --config <路径>
 ```
 
 配置项和默认值见 `config.example.json`。`bots` 里可以配多个机器人，写法见 [docs/config.md § 配置多个机器人](../docs/config.md#配置多个机器人)。
@@ -22,7 +22,7 @@ node index.mjs                       # 默认读工作目录下的 config.json�
 ## 部署到 VPS
 
 ```bash
-# 上传 index.mjs package.json config.json wecom-bot.service 到 /opt/wecom-bot，然后：
+# 上传 package.json、src/ 整个目录、config.json、wecom-bot.service 到 /opt/wecom-bot（确认文件属主和运行用户一致），然后：
 cd /opt/wecom-bot && npm i && chmod 600 config.json
 sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now wecom-bot
@@ -112,9 +112,9 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 ## 自测
 
 ```bash
-node test_mock.mjs     # 起假网关，61 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
+npm test               # 即 node test/mock.test.mjs：起假网关，61 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
 ```
 
 ## 文件
 
-`index.mjs` 主程序　`test_mock.mjs` 自测　`wecom-bot.service` systemd 单元　`config.example.json` 配置模板
+`src/index.mjs` 入口，`src/` 下其余模块的分工见 [docs/README.md § 功能速查](../docs/README.md#功能速查)　`test/mock.test.mjs` 自测　`wecom-bot.service` systemd 单元　`config.example.json` 配置模板

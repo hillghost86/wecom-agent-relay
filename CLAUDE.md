@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 目录 | 运行位置 | 说明 |
 |---|---|---|
-| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `bots/<key>/messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
+| `server/` | VPS 常驻（宝塔 Node 项目或 systemd） | 入口 `src/index.mjs`，各模块分工见 `docs/README.md` 的功能速查：连企微 WebSocket 长连接收消息，落盘 `bots/<key>/messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
 | `client/` | agent 所在机器 | `sentinel.mjs` 哨兵：轮询发现新消息即退出以唤醒对话式 agent；`poll.mjs`：拉取 / 单条取 / 回复 / 推送 / ack 的命令行工具 |
 | `skill/wecom-agent-relay/` | 随仓库分发 | WorkBuddy 技能：一句话安装引导 + 架构说明 + 排障手册。改接口、改部署步骤时要同步它 |
 | `docs/` | 随仓库分发 | 参考手册，入口 `docs/README.md` 按功能索引：`api.md` `config.md` `deploy.md` `protocol.md` `presence.md` `agent-integration.md` `roadmap.md`。找功能先看这里 |
@@ -24,9 +24,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # —— server/ ——
-cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 61 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
-node index.mjs --config <路径>           # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
+cd server && for f in src/*.mjs src/http/*.mjs test/*.mjs; do node --check "$f"; done   # 改完必做：语法检查
+npm test                                 # 必做（即 node --test test/*.test.mjs）：起假网关跑 61 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
+node src/index.mjs --config <路径>       # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
 
 # —— 只读检查生产（管理员 token，不带 X-Relay-Agent 头）——
 A=~/.config/wecom-agent-relay/admin.json
@@ -37,7 +37,7 @@ node client/poll.mjs --health            # 测试 bot 状态：subscribed:true �
 node client/sentinel.mjs --status        # 本地/服务端 seq 对照
 
 # —— 部署（由用户在 VPS 上执行，我没有 VPS 的 SSH）——
-scp server/index.mjs <vps>:<部署目录>/index.mjs      # 部署目录见本机记忆
+scp -r server/package.json server/src <vps>:<部署目录>/   # 部署目录见本机记忆；上传后确认文件属主和运行用户一致
 # 用户的 VPS 用宝塔「Node 项目」管理进程（npm start，读部署目录下的 config.json），不是 systemd：
 # 重启和看日志都在宝塔面板里做，不要给 systemctl / journalctl 命令
 ```
@@ -47,7 +47,7 @@ scp server/index.mjs <vps>:<部署目录>/index.mjs      # 部署目录见本机
 ## 协议与部署事实（全部实测过，别按常识猜）
 
 - 企微 API 模式二选一：长连接 or 回调 URL。本项目用长连接，不需要域名备案、不需要解密。
-- **一个机器人同一时刻只能有一条 WS 连接**，新连接踢旧连接，被踢方收到 `disconnected_event`。所以本地绝不能用生产 bot 的凭证跑 `server/index.mjs`；只有测试 bot 可以（见硬规则 4 的例外）。
+- **一个机器人同一时刻只能有一条 WS 连接**，新连接踢旧连接，被踢方收到 `disconnected_event`。所以本地绝不能用生产 bot 的凭证跑 `server/src/index.mjs`；只有测试 bot 可以（见硬规则 4 的例外）。
 - **机器人离线期间的消息企微直接丢，且发送方显示发送成功。** 重启服务就是一个几秒的空窗，改完代码要挑没人用的时候部署，并在回复里提醒。`ADMIN_USERID` 配了会在重连后自报离线时段。
 - 收到消息 5 秒内必须回一帧；进程自动回 `stream(finish=true)` 的「已收到」占位。
 - agent 回复走消息自带的 `response_url`：1 小时内有效、只能调一次、`msgtype` 只认 `markdown`（`text` 会被拒）、HTTP 200 不代表成功要看 body 的 `errcode`、群聊自动引用原消息。和「已收到」互不影响，用户看到两条。
@@ -68,7 +68,7 @@ scp server/index.mjs <vps>:<部署目录>/index.mjs      # 部署目录见本机
 
 1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 VPS 的 `config.json`、本机的 `client/config.json` 与 `~/.config/wecom-agent-relay/admin.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
 2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`config.json` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
-3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再对真网关做一次只读验证。**生产 bot 的只读验证用不带 `X-Relay-Agent` 头的 curl**（token 取自 `admin.json`，见「常用命令」），不要拿 `poll.mjs` 对生产：它带头会把这台机器记成处理端在线，污染线上 presence。本机 `client/` 指向测试 bot，`poll.mjs` 和哨兵对它随便跑。跑不了要明说。
+3. **改完 `server/src/` 下任何文件必跑** `node --check` 和 `npm test`，新行为必须在 `server/test/mock.test.mjs` 里有断言；改完 `client/*.mjs` 同样跑 server 的 `npm test`（含 client 断言），再对真网关做一次只读验证。**生产 bot 的只读验证用不带 `X-Relay-Agent` 头的 curl**（token 取自 `admin.json`，见「常用命令」），不要拿 `poll.mjs` 对生产：它带头会把这台机器记成处理端在线，污染线上 presence。本机 `client/` 指向测试 bot，`poll.mjs` 和哨兵对它随便跑。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
    **例外：测试 bot**（2026-09-24 用户授权）。对 key 为 `test` 的机器人，我可以自行调 `/send`、`--reply`、`--ack`、带 `X-Relay-Agent` 的请求，测试 bot 目前配在 VPS 的 `bots` 里（key `test`），本机 `client/config.json` 用它自己的 token 访问 `…/bots/test`。要在本机跑服务端连它做真实联调时，先让用户从 VPS 配置里删掉 `test` 并重启：同一个 bot 两处同时连会互相踢、反复重连。生产 bot 仍按本条执行。
 5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` 命令，并请用户在宝塔面板里重启 Node 项目，提醒重启会丢那几秒的消息。
@@ -98,11 +98,12 @@ scp server/index.mjs <vps>:<部署目录>/index.mjs      # 部署目录见本机
 
 管理员 token 换了之后要同步改这个文件。
 
-`server/` 目录下不放真实 `config.json`：服务端默认读工作目录的 `config.json`，放一份生产配置在这里，随手 `node index.mjs` 就会踢掉 VPS 上的生产连接。
+`server/` 目录下不放真实 `config.json`：服务端默认读工作目录的 `config.json`，放一份生产配置在这里，随手 `npm start` 就会踢掉 VPS 上的生产连接。
 
 ## 代码规范
 
 - 纯 ESM `.mjs`，无构建步骤，无 TypeScript；配置全部走 `config.json`（`server/` 的路径用 `--config` 指定，默认工作目录；`client/` 用同目录 config.json，环境变量可覆盖），启动时缺必填项直接报错退出。
+- 模块边界：除 `src/index.mjs` 外，任何模块被 import 时不得有副作用（不读文件、不连网、不监听、不退出进程）；配置由入口加载后显式传参，不设模块级全局配置。
 - 注释只写「为什么」不写「是什么」，用中文，一两行说清；协议坑点写在函数头注释里而不是散落各处。
 - 日志：`log` / `warn` 带 ISO 时间戳；不打印 Secret、token、完整 `response_url`（只打尾部几位）。
 - 文档同步：改接口、改 `config.json` 配置项、发现新的协议事实，同一次改动里更新对应的 `docs/*.md`（完整参考），再看 `README.md`（总览）和 `server/README.md`（部署速查）要不要跟着改。新协议事实写进 `docs/protocol.md` 并标「文档 / 实测 / 推断」和日期；路线图结论写进 `docs/roadmap.md`。各份分工见 `docs/README.md` 末尾，别重复大段。
@@ -110,7 +111,7 @@ scp server/index.mjs <vps>:<部署目录>/index.mjs      # 部署目录见本机
 
 ## 工作流
 
-- **分模型分工**：主会话（Fable）只做方案、任务编排、审核与验收；写代码一律派 `coder` 子代理（Opus，定义在 `.claude/agents/coder.md`，缺失时按该文件重建）。派活前方案须已经用户确认；任务说明把方案、涉及文件、验证要求写全（子代理看不到对话历史）；同一时间只派一个写码代理；回来后主会话自己看 diff、复跑 `test_mock.mjs`，不以子代理的汇报代替验证。
+- **分模型分工**：主会话（Fable）只做方案、任务编排、审核与验收；写代码一律派 `coder` 子代理（Opus，定义在 `.claude/agents/coder.md`，缺失时按该文件重建）。派活前方案须已经用户确认；任务说明把方案、涉及文件、验证要求写全（子代理看不到对话历史）；同一时间只派一个写码代理；回来后主会话自己看 diff、复跑 `npm test`，不以子代理的汇报代替验证。
 - 一个改动做完的标准：语法检查过、mock 测试过、README 同步、给出部署命令、列出需要通知 WorkBuddy 的接口变化。
 - 功能规划、已知小问题、运维待办、待通知 WorkBuddy 的事项记在 `local/功能规划.md`（`local/` 已 `.gitignore`，不入库）。开始新功能前先读它，做完一项就更新它；对外公开的只有 `docs/roadmap.md` 里已定的方向。
 
@@ -122,7 +123,7 @@ WorkBuddy 保持的约定：目录布局和仓库一致；不改 `server/`；凭
 
 发布步骤：
 1. 从 WorkBuddy 的工作目录拉整个文件夹（位置和 SSH 方式在本机记忆里，不入仓）。看它的 `git log` 和相对上次的 diff，逐条核对：采纳的直接合入，需要改的按仓库风格改，不采纳的在回复里说明原因。`dist/`、`sentinel_cursor.json`、`config.json` 不带过来。
-2. 跑 `server/test_mock.mjs`，再用管理员 token 对生产做一次不带头的 `/bots` 只读检查。
+2. 跑 server 的 `npm test`，再用管理员 token 对生产做一次不带头的 `/bots` 只读检查。
 3. 私有信息扫描：`git ls-files | xargs grep -niE '<域名关键字>|<userid>|aib[A-Za-z0-9_-]{30,}|192\.168|[0-9a-f]{64}'`（域名关键字和 userid 见本机记忆），零命中才能提交。
 4. 更新 `CHANGELOG.md`：把「未发布」下的条目归到新版本号并标日期。
 5. 提交、推送、打 tag；WorkBuddy 产出的 `dist/wecom-agent-relay.zip` 挂到 GitHub Release，不入库。
