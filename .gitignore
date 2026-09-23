@@ -19,3 +19,6 @@ dist/
 
 # 本机 agent 定义
 .claude/
+
+# 本地规划文档，不公开
+local/
