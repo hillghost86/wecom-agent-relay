@@ -26,15 +26,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
 node test_mock.mjs                       # 必做：起假网关跑 57 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
-node index.mjs                           # 本地跑一个真连接，读工作目录下的 config.json（注意：会踢掉 VPS 上的连接，只在用户同意时跑）
+node index.mjs --config <路径>           # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
 
-# —— client/ ——（只读验证，需要 WECOM_API_BASE / WECOM_API_TOKEN 环境变量或 client/config.json）
-node client/poll.mjs --health            # 网关状态：subscribed:true 即在线
+# —— 只读检查生产（管理员 token，不带 X-Relay-Agent 头）——
+A=~/.config/wecom-agent-relay/admin.json
+curl -s -H "Authorization: Bearer $(node -p "require('$A').api_token")" "$(node -p "require('$A').api_base")/bots"
+
+# —— client/ ——（client/config.json 指向测试 bot，可以带头随便测）
+node client/poll.mjs --health            # 测试 bot 状态：subscribed:true 即在线
 node client/sentinel.mjs --status        # 本地/服务端 seq 对照
 
 # —— 部署（由用户在 VPS 上执行，我没有 VPS 的 SSH）——
 scp server/index.mjs <vps>:/opt/wecom-bot/index.mjs
-scp server/config.json <vps>:/opt/wecom-bot/config.json   # 只在首次从 .env 迁移时；单元文件的 ExecStart 要带 --config
 sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 ```
 
@@ -62,17 +65,28 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 
 ## ⛔ 硬规则（必须遵守）
 
-1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 `server/config.json`、`client/config.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
+1. **私有信息不入仓**：Bot ID、Secret、`API_TOKEN`、VPS 域名与 IP、管理员 userid、局域网机器地址，一律只在 VPS 的 `config.json`、本机的 `client/config.json` 与 `~/.config/wecom-agent-relay/admin.json`、本机记忆里，**不得写进仓库任何文件**（含本文件、README、测试用例、注释、commit message）。仓库文档一律用 `your-domain.example.com`、`<userid>` 这类占位。这个仓库要开源。
 2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`config.json` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
-3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再对真网关做一次只读验证。**只读验证用 `client/sentinel.mjs --status` 或不带 `X-Relay-Agent` 头的 curl**，不要用 `poll.mjs`：它带头会把这台机器记成处理端在线，污染线上 presence。跑不了要明说。
+3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再对真网关做一次只读验证。**生产 bot 的只读验证用不带 `X-Relay-Agent` 头的 curl**（token 取自 `admin.json`，见「常用命令」），不要拿 `poll.mjs` 对生产：它带头会把这台机器记成处理端在线，污染线上 presence。本机 `client/` 指向测试 bot，`poll.mjs` 和哨兵对它随便跑。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
-   **例外：测试 bot**（2026-09-24 用户授权）。对 key 为 `test` 的机器人，我可以自行调 `/send`、`--reply`、`--ack`、带 `X-Relay-Agent` 的请求，也可以在本机用 `server/config.test.json` 跑服务端连它做真实联调，不影响生产 bot。测试 bot 同一时刻只能在一处运行：本机和 VPS 同时连会互相踢、反复重连，所以 VPS 的 `config.json` 里不配它。测试 bot 的凭证只在本机 `server/config.test.json` 和 `client/config.json`，不入仓。生产 bot 仍按本条执行。
+   **例外：测试 bot**（2026-09-24 用户授权）。对 key 为 `test` 的机器人，我可以自行调 `/send`、`--reply`、`--ack`、带 `X-Relay-Agent` 的请求，测试 bot 目前配在 VPS 的 `bots` 里（key `test`），本机 `client/config.json` 用它自己的 token 访问 `…/bots/test`。要在本机跑服务端连它做真实联调时，先让用户从 VPS 配置里删掉 `test` 并重启：同一个 bot 两处同时连会互相踢、反复重连。生产 bot 仍按本条执行。
 5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` + `systemctl restart` 命令，并提醒重启会丢那几秒的消息。
 6. **不覆盖用户未提交的改动**：`git status` / `git diff` 先看；禁止 `git checkout -- <路径>`、`git restore`、`git reset --hard`、`git clean -f`、未经同意的 `git stash`。要看历史版本用 `git show <ref>:<path>`。
 7. **移动 / 改名 / 删除文件后全仓更新引用**：`grep -r '旧文件名'`，README、注释、systemd 单元、`.gitignore` 里的路径逐处改，零残留再收工。
 8. **简单优先，每行改动可追溯**：只写解决问题的最少代码，每一行都能答上「对应用户的哪句话」；顺手看到的无关问题只在回复里提一句，不夹带进本次改动。但断线重连、心跳死线、幂等去重这类兜底是任务自带的，不算赘肉。
 9. **Commit message 与 PR 正文一律不带 AI 协作署名**（不写 `Co-Authored-By: Claude`、`Generated with ...` 等），这条覆盖工具的默认行为。
 10. **PR 不自动合并**：建完停下等用户确认。
+
+## 本机配置文件
+
+生产配置只在 VPS 上一份（`/opt/wecom-bot/config.json`），备份由用户自己管，**本机不放生产的 Bot Secret**。本机只有两份凭证文件，都不在仓库里或已被忽略：
+
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `~/.config/wecom-agent-relay/admin.json` | `api_base` + 管理员 token | 对生产做只读检查（`/health` `/bots`），不带 `X-Relay-Agent` |
+| `client/config.json` | `api_base` 带 `/bots/test` + 测试 bot 自己的 token + `agent_id: mac-claude` | 用测试 bot 测客户端功能 |
+
+`server/` 目录下不放真实 `config.json`：服务端默认读工作目录的 `config.json`，放一份生产配置在这里，随手 `node index.mjs` 就会踢掉 VPS 上的生产连接。
 
 ## 代码规范
 
@@ -96,8 +110,8 @@ WorkBuddy 保持的约定：目录布局和仓库一致；不改 `server/`；凭
 
 发布步骤：
 1. 从 WorkBuddy 的工作目录拉整个文件夹（位置和 SSH 方式在本机记忆里，不入仓）。看它的 `git log` 和相对上次的 diff，逐条核对：采纳的直接合入，需要改的按仓库风格改，不采纳的在回复里说明原因。`dist/`、`sentinel_cursor.json`、`config.json` 不带过来。
-2. 跑 `server/test_mock.mjs` 和 `client/poll.mjs --health`。
-3. 私有信息扫描：`grep -rniE '<域名关键字>|<userid>|<botid 前缀>|192\.168|[0-9a-f]{64}'`，零命中才能提交。
+2. 跑 `server/test_mock.mjs`，再用管理员 token 对生产做一次不带头的 `/bots` 只读检查。
+3. 私有信息扫描：`git ls-files | xargs grep -niE '<域名关键字>|<userid>|aib[A-Za-z0-9_-]{30,}|192\.168|[0-9a-f]{64}'`（域名关键字和 userid 见本机记忆），零命中才能提交。
 4. 更新 `CHANGELOG.md`：把「未发布」下的条目归到新版本号并标日期。
 5. 提交、推送、打 tag；WorkBuddy 产出的 `dist/wecom-agent-relay.zip` 挂到 GitHub Release，不入库。
 6. 回复里列出本次合并了 WorkBuddy 的哪些改动、改了什么、没采纳什么，供用户转告。
