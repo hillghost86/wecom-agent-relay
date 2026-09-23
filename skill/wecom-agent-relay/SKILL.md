@@ -37,6 +37,7 @@ cp client/config.example.json client/config.json
 ```
 
 编辑 `client/config.json`：`api_base` 填网关 HTTPS 地址（部署 server 后确定），`api_token` 填 server `config.json` 里的 `http.api_token`。
+网关接了多个机器人、而 WorkBuddy 只负责其中一个时：`api_base` 填 `https://域名/bots/<key>`，`api_token` 填这个机器人的 `bots[].api_token`（只能访问它自己）。
 可选 `agent_id`：这台处理端在网关侧的标识，不填默认用本机主机名。
 **token/Secret 是敏感值：只写进 client/config.json（已在 .gitignore），不得写入对话或任何会入库的文件。**
 

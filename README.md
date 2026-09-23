@@ -11,7 +11,7 @@
    │ wss 长连接（30s 心跳 · 断线自动重连）
    ▼
 VPS 网关 server/（7×24 在线，唯一持久层 messages.jsonl）
-   │ HTTPS API：/health /messages /messages/<seq> /ack /send
+   │ HTTPS API：/health /messages /messages/<seq> /ack /send（多 bot 时加前缀 /bots/<key>/）
    ▼
 本机 client/
    ├─ sentinel.mjs   哨兵：轮询发现新消息 → 退出 → 借「后台任务完成通知」唤醒 agent
@@ -143,6 +143,8 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 | `NO_MSG ...` | `--once` 模式下无新消息 |
 
 ## HTTP API（VPS 网关，请求头 `Authorization: Bearer <api_token>`；处理端另带 `X-Relay-Agent: <agent_id>` 报在线）
+
+一个网关可以接多个机器人：接口加前缀 `/bots/<key>` 指定机器人，不带前缀指向第一个；token 分管理员和单个 bot 两级。详见 [docs/api.md § 多 bot 路由](docs/api.md#多-bot-路由)。
 
 | 接口 | 作用 |
 |---|---|

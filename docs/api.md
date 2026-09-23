@@ -4,11 +4,30 @@ VPS 网关（`server/index.mjs`）在 `127.0.0.1:8788` 上提供的接口。对�
 
 ## 鉴权与公共约定
 
-- 每个请求带 `Authorization: Bearer <api_token>`；也接受 `?token=<api_token>`，但 token 会进反代日志，只在没法改请求头时用。
-- token 比对是恒定时间比较；失败返回 `401 {"ok":false,"error":"unauthorized"}`，并在服务端日志里记 IP 和路径（IP 取 `X-Forwarded-For` 第一段）。
-- 可选请求头 `X-Relay-Agent: <agent_id>`：鉴权通过后，网关把这次请求记成「处理端露了一面」，用于判在线（见 [presence.md](presence.md)）。**只读排查时不要带**，否则会把你这台机器记成处理端在线。
+- 每个请求带 `Authorization: Bearer <token>`；也接受 `?token=<token>`，但 token 会进反代日志，只在没法改请求头时用。
+- token 分两级（配置见 [config.md § 两级 token](config.md#两级-token)）：**管理员 token**（`http.api_token`）能访问所有 bot 和 `GET /bots`；**bot token**（`bots[].api_token`）只能访问它自己那个 bot。两级都没配时不鉴权。
+- token 比对是恒定时间比较；不认识的 token 返回 `401 {"ok":false,"error":"unauthorized"}`，bot token 访问了别的 bot 返回 `403 {"ok":false,"error":"forbidden"}`。两种都在服务端日志里记 IP 和路径（IP 取 `X-Forwarded-For` 第一段）。
+- 可选请求头 `X-Relay-Agent: <agent_id>`：鉴权通过后，网关把这次请求记成请求路径所指那个 bot 的「处理端露了一面」，用于判在线（见 [presence.md](presence.md)）。**只读排查时不要带**，否则会把你这台机器记成处理端在线。
 - 所有响应都是 JSON，都有 `ok` 字段。**业务失败返回 200 + `ok:false`**，不返回 5xx，因为 Cloudflare 一类的反代会用自己的错误页替换 5xx 响应体，把失败原因吞掉。只有代码异常才 500。
 - 参数非法返回 400，路径不存在返回 404。
+
+## 多 bot 路由
+
+配了多个机器人时，下文每个接口都可以加前缀 `/bots/<key>` 指定机器人，如 `/bots/sales/messages`、`/bots/sales/ack?seq=3`。
+
+- **不带前缀**的路径指向 `bots` 里的**第一个**机器人，单 bot 的老部署和老客户端不用改。
+- 客户端接某个 bot 时，把 `api_base` 填成 `https://your-domain.example.com/bots/<key>` 即可，`client/` 不需要改代码。
+- 判定顺序：先认 token（不认识 → 401），再看权限（bot token 访问别的 bot、`GET /bots`、或不存在的 key → 403），最后看 key 是否存在（管理员访问不存在的 key → `404 {"ok":false,"error":"unknown bot"}`）。key 不存在的 404 放在鉴权之后，没有 token 的人没法借它探测有哪些 bot。
+
+### GET /bots
+
+仅管理员 token。返回全部 bot 的状态，数组里每一项和该 bot 的 [`/health`](#get-health) 完全一样，顺序同配置：
+
+```json
+{ "ok": true, "bots": [ { "ok": true, "bot": "default", "subscribed": true, … }, { "ok": true, "bot": "sales", … } ] }
+```
+
+它本身不带 bot 前缀，所以带 `X-Relay-Agent` 请求它不会刷新任何 bot 的在线状态。
 
 ## GET /health
 
@@ -23,7 +42,7 @@ VPS 网关（`server/index.mjs`）在 `127.0.0.1:8788` 上提供的接口。对�
   "seq": 28,                   // 落盘的最大 seq
   "cursor": 27,                // 已确认（ack）到哪
   "count": 28,                 // 内存里的记录数
-  "bot": "default",            // 配置里的 bot key
+  "bot": "default",            // 配置里的 bot key（不带前缀时是 bots 里第一个）
   "agent_online": null,        // true / false / null（未知：进程起来后还没见过任何 agent）
   "agent_last_seen": null,     // 处理端最后一次露面（ISO 时间）
   "last_agent": null,          // 最后露面的 agent_id

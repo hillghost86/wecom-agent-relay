@@ -8,6 +8,11 @@
 - `client/config.json` 的 `api_token` 与 server `config.json` 的 `http.api_token` 不一致，或环境变量覆盖了错误值
 - 检查优先级：环境变量 `WECOM_API_TOKEN` > config.json
 
+### `403 forbidden`
+- 用的是某个机器人自己的 token（`bots[].api_token`），却访问了别的机器人：检查 `api_base` 末尾的 `/bots/<key>` 是不是这个 token 对应的机器人
+- 不带 `/bots/<key>` 前缀时指向配置里的第一个机器人，bot token 不是它的也会 403
+- `GET /bots` 只有管理员 token（`http.api_token`）能调
+
 ### `sentinel --once` 一直 HTTP 5xx / 超时
 - 网关进程挂了：VPS 上 `systemctl status wecom-bot`，`journalctl -u wecom-bot -n 50`
 - 反代没配好：直接 curl `https://域名/health`（带 Bearer）看是否 200

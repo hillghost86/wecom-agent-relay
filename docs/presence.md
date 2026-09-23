@@ -53,4 +53,6 @@
 
 ## 与多 agent 的关系
 
-当前约定是一个 agent 对应一个 bot，`agent_id` 只是标签，不做路由。多 bot 时状态会按 bot 分开记录，详见 [roadmap.md](roadmap.md)。
+在线状态按 bot 各自记录、各自持久化（每个 bot 自己的 `.state.json`）。`X-Relay-Agent` 只记到请求路径指向的那个 bot：请求 `/bots/sales/health` 只刷新 `sales` 的在线状态，不带前缀的请求只刷新 `bots` 里第一个，`GET /bots` 不刷新任何一个。秒回分档和离线告警也按各自 bot 的状态判断。
+
+约定一个 agent 对应一个 bot，`agent_id` 只是标签，不做路由；路由靠客户端 `api_base` 里的 `/bots/<key>`。

@@ -14,17 +14,19 @@
  *     "http": { "host": "127.0.0.1", "port": 8788, "api_token": "<openssl rand -hex 32>" },
  *     "tz": "Asia/Shanghai",              // 自报里的时间显示时区
  *     "agent_online_secs": 300,           // 处理端多久没来访就算离线
- *     "bots": [{ "key": "default", "bot_id": "...", "secret": "...",
+ *     "bots": [{ "key": "default", "bot_id": "...", "secret": "...", "api_token": "...",
  *                "reply_text": "已收到", "reply_text_offline": "...{duration}...",
  *                "admin_userid": "...", "offline_alert_mins": 0, "msg_log": "..." }]
  *   }
- *   可选项与默认值见 config.example.json。**当前版本只支持 bots 里的一个机器人。**
+ *   可选项与默认值见 config.example.json。bots 可以配多个，每个各自一条连接、各自的数据文件和在线状态。
  *   兼容期：没有 config.json 且有 WECOM_BOT_ID / WECOM_BOT_SECRET 时从环境变量拼配置，下个版本移除。
  *
  * 部署形态：本进程只在 127.0.0.1 上说明文 HTTP；HTTPS、证书、域名、对外端口由前面的反代
  * （nginx / Caddy / 宝塔）负责，反代把请求转到 127.0.0.1:8788 并原样透传 Authorization 头。
  *
- * HTTP API（给 agent 用）：
+ * HTTP API（给 agent 用）：路径可带前缀 /bots/<key>/ 指定机器人，不带前缀指向 bots 里的第一个
+ *   鉴权：http.api_token 是管理员 token，可访问任意 bot；bots[].api_token 只能访问自己那个 bot
+ *   GET  /bots                           （仅管理员）全部 bot 的 /health 汇总
  *   GET  /health                         连接状态 + 处理端在线状态
  *   GET  /messages?after=<seq>&limit=50  拉 seq 大于 after 的消息（默认 after=已确认游标，limit 默认 50 最多 500）
  *   GET  /messages/<seq>                 按 seq 取单条，不存在返回 404
@@ -44,6 +46,9 @@ import http from 'node:http';
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const warn = (...a) => console.warn(new Date().toISOString(), ...a);
+// 多 bot 时日志前面带 [key]；单 bot 时原样，老部署的日志和以前逐字相同
+const tagged = (tag) => (tag ? { log: (...a) => log(tag, ...a), warn: (...a) => warn(tag, ...a) } : { log, warn });
+const isLoopback = (host) => host === '127.0.0.1' || host === 'localhost' || host === '::1';
 
 const DEFAULT_REPLY_OFFLINE = '已收到。处理端已离线 {duration}，上线后会处理';
 
@@ -145,15 +150,36 @@ function normalizeConfig(raw, source) {
       adminUserId: b.admin_userid ?? '',
       offlineAlertMins: Number(b.offline_alert_mins ?? 0),
       msgLog,
+      apiToken: b.api_token ?? '',
+      tag: list.length > 1 ? `[${key}]` : '',
+      at,
     };
   });
 
+  // bot token 与管理员 token 或彼此相同，就分不清请求者能访问哪个 bot
+  const seenTokens = new Set();
+  for (const b of bots) {
+    if (!b.apiToken) continue;
+    if (b.apiToken === gw.apiToken) errs.push(`${b.at}: api_token 不能和 http.api_token 相同`);
+    else if (seenTokens.has(b.apiToken)) errs.push(`${b.at}: api_token 和别的机器人重复`);
+    seenTokens.add(b.apiToken);
+  }
+  // 两个 bot 写同一个文件会互相覆盖 seq 和游标
+  const seenLogs = new Map();
+  for (const b of bots) {
+    if (!b.msgLog || b.msgLog === 'off') continue;
+    const f = path.resolve(b.msgLog);
+    if (seenLogs.has(f)) errs.push(`${b.at}: msg_log 和 ${seenLogs.get(f)} 指向同一个文件 ${f}`);
+    else seenLogs.set(f, b.at);
+  }
+  // 对外监听时明文 HTTP 上跑 token，弱 token 等于没设
+  if (gw.httpPort && !isLoopback(gw.httpHost)) {
+    if (!gw.apiToken || gw.apiToken.length < 32) errs.push('http.host 对外监听时必须设置至少 32 字符的 http.api_token（建议 openssl rand -hex 32）');
+    for (const b of bots) if (b.apiToken && b.apiToken.length < 32) errs.push(`${b.at}: http.host 对外监听时 api_token 必须至少 32 字符（建议 openssl rand -hex 32）`);
+  }
+
   if (errs.length) {
     console.error(`配置有误（来源：${source}）：\n- ${errs.join('\n- ')}`);
-    process.exit(1);
-  }
-  if (bots.length > 1) {
-    console.error('配置里有多个机器人，当前版本只支持一个；多 bot 支持将在后续版本提供');
     process.exit(1);
   }
   return { gw, bots };
@@ -191,7 +217,8 @@ async function getWebSocketCtor() {
 
 /* ---------- 消息存储：JSONL 追加 + 内存索引 + 已确认游标 ---------- */
 class MessageStore {
-  constructor(file) {
+  constructor(file, logger) {
+    this.L = logger;
     this.file = file && file !== 'off' ? file : null;
     this.stateFile = this.file ? this.file + '.state.json' : null;
     this.items = [];
@@ -219,9 +246,9 @@ class MessageStore {
         this.loadedState = JSON.parse(fs.readFileSync(this.stateFile, 'utf-8')) || {};
         this.cursor = Number(this.loadedState.cursor) || 0;
       }
-      log(`消息存储已加载：${this.items.length} 条，seq=${this.seq}，游标=${this.cursor}`);
+      this.L.log(`消息存储已加载：${this.items.length} 条，seq=${this.seq}，游标=${this.cursor}`);
     } catch (e) {
-      warn('加载消息存储失败:', e.message);
+      this.L.warn('加载消息存储失败:', e.message);
     }
   }
   append(record) {
@@ -233,7 +260,7 @@ class MessageStore {
         fs.mkdirSync(path.dirname(this.file), { recursive: true });
         fs.appendFileSync(this.file, JSON.stringify(r) + '\n');
       } catch (e) {
-        warn('写消息日志失败:', e.message);
+        this.L.warn('写消息日志失败:', e.message);
       }
     }
     return r;
@@ -258,7 +285,7 @@ class MessageStore {
   }
   saveState() {
     if (!this.stateFile) return;
-    try { fs.writeFileSync(this.stateFile, JSON.stringify({ cursor: this.cursor, ...this.extraState() })); } catch (e) { warn('写游标失败:', e.message); }
+    try { fs.writeFileSync(this.stateFile, JSON.stringify({ cursor: this.cursor, ...this.extraState() })); } catch (e) { this.L.warn('写游标失败:', e.message); }
   }
 }
 
@@ -267,7 +294,9 @@ class Bot {
   constructor(conf) {
     this.key = conf.key;
     this.conf = conf;
-    this.store = new MessageStore(conf.msgLog);
+    const logger = tagged(conf.tag);
+    Object.assign(this, logger);   // this.log / this.warn，BotConnection 和告警也用它
+    this.store = new MessageStore(conf.msgLog, logger);
     // 最后在线时刻：每次心跳写一次，重启后用来算空窗
     this.aliveFile = conf.msgLog && conf.msgLog !== 'off' ? conf.msgLog + '.alive' : null;
     this.seenMsgIds = new Set();
@@ -379,15 +408,15 @@ class BotConnection {
     const now = Date.now();
     const secs = Math.round((now - since) / 1000);
     if (secs < gw.outageMinSecs) return; // 秒级抖动不打扰
-    if (now - this.lastOutageReportAt < gw.outageReportMinMs) { log(`离线 ${secs}s（${reason}），1 分钟内已报过，跳过`); return; }
+    if (now - this.lastOutageReportAt < gw.outageReportMinMs) { this.bot.log(`离线 ${secs}s（${reason}），1 分钟内已报过，跳过`); return; }
     this.lastOutageReportAt = now;
     const content = `⚠️ 机器人离线 **${secs} 秒**（${reason}）\n${fmtTime(since)} → ${fmtTime(now)}\n期间发给机器人的消息已丢失，请重发。`;
     try {
       const resp = await this.request({ cmd: 'aibot_send_msg', body: { chatid: this.conf.adminUserId, chat_type: 1, msgtype: 'markdown', markdown: { content } } }, 10000);
-      if (resp.errcode === 0) log(`断线自报已发送：离线 ${secs}s（${reason}）`);
-      else warn(`断线自报被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
+      if (resp.errcode === 0) this.bot.log(`断线自报已发送：离线 ${secs}s（${reason}）`);
+      else this.bot.warn(`断线自报被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
     } catch (e) {
-      warn('断线自报失败:', e.message);
+      this.bot.warn('断线自报失败:', e.message);
     }
   }
 
@@ -409,7 +438,7 @@ class BotConnection {
 
   connect() {
     if (this.stopped) return;
-    log(`连接 ${gw.wsUrl} ...`);
+    this.bot.log(`连接 ${gw.wsUrl} ...`);
     const ws = new this.WS(gw.wsUrl);
     this.ws = ws;
     this.subscribed = false;
@@ -417,7 +446,7 @@ class BotConnection {
 
     ws.addEventListener('open', () => this.onOpen());
     ws.addEventListener('message', (ev) => this.onMessage(ev.data));
-    ws.addEventListener('error', (ev) => warn('连接错误:', ev?.message || ev?.error?.message || 'unknown'));
+    ws.addEventListener('error', (ev) => this.bot.warn('连接错误:', ev?.message || ev?.error?.message || 'unknown'));
     ws.addEventListener('close', (ev) => this.onClose(ev));
   }
 
@@ -435,12 +464,12 @@ class BotConnection {
     if (this.stopped) return;
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, gw.backoffMaxMs);
-    log(`${delay / 1000}s 后重连`);
+    this.bot.log(`${delay / 1000}s 后重连`);
     setTimeout(() => this.connect(), delay);
   }
 
   onClose(ev) {
-    warn(`连接关闭 code=${ev?.code} reason=${ev?.reason || ''}`);
+    this.bot.warn(`连接关闭 code=${ev?.code} reason=${ev?.reason || ''}`);
     if (this.subscribed && !this.downSince) this.downSince = Date.now();
     this.subscribed = false;
     this.cleanup();
@@ -448,22 +477,22 @@ class BotConnection {
   }
 
   async onOpen() {
-    log('TCP/WS 已建立，发送订阅');
+    this.bot.log('TCP/WS 已建立，发送订阅');
     try {
       const resp = await this.request({ cmd: 'aibot_subscribe', body: { bot_id: this.conf.botId, secret: this.conf.secret } }, gw.subscribeTimeoutMs);
       if (resp.errcode !== 0) {
-        warn(`订阅失败 errcode=${resp.errcode} errmsg=${resp.errmsg}；检查 BotID/Secret。为避免触发频率限制，退避到上限再重试`);
+        this.bot.warn(`订阅失败 errcode=${resp.errcode} errmsg=${resp.errmsg}；检查 BotID/Secret。为避免触发频率限制，退避到上限再重试`);
         this.backoffMs = gw.backoffMaxMs;
         this.ws.close();
         return;
       }
       this.subscribed = true;
       this.backoffMs = gw.backoffMinMs;
-      log('订阅成功，开始心跳');
+      this.bot.log('订阅成功，开始心跳');
       this.pingTimer = setInterval(() => this.heartbeat(), gw.pingIntervalMs);
       this.reportOutage();
     } catch (e) {
-      warn('订阅异常:', e.message);
+      this.bot.warn('订阅异常:', e.message);
       if (this.ws) this.ws.close();
     }
   }
@@ -471,14 +500,14 @@ class BotConnection {
   async heartbeat() {
     try {
       const resp = await this.request({ cmd: 'ping' }, gw.pingIntervalMs);
-      if (resp.errcode !== 0) warn(`ping 回包异常 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
+      if (resp.errcode !== 0) this.bot.warn(`ping 回包异常 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
       this.missedPongs = 0;
       this.bot.writeAlive();
     } catch {
       this.missedPongs++;
-      warn(`心跳无回包 (${this.missedPongs})`);
+      this.bot.warn(`心跳无回包 (${this.missedPongs})`);
       if (this.missedPongs >= 2) {
-        warn('连续两次心跳无回包，主动断开重连');
+        this.bot.warn('连续两次心跳无回包，主动断开重连');
         this.ws.close();
       }
     }
@@ -508,7 +537,7 @@ class BotConnection {
     try {
       frame = JSON.parse(typeof data === 'string' ? data : data.toString());
     } catch {
-      warn('收到非 JSON 帧:', String(data).slice(0, 200));
+      this.bot.warn('收到非 JSON 帧:', String(data).slice(0, 200));
       return;
     }
     const reqId = frame?.headers?.req_id;
@@ -524,7 +553,7 @@ class BotConnection {
 
     // 2. 对 aibot_respond_msg 等的回执（req_id 复用了回调的 id，不在 pending 里）
     if (!frame.cmd && typeof frame.errcode === 'number') {
-      if (frame.errcode !== 0) warn(`回执异常 req_id=${reqId} errcode=${frame.errcode} errmsg=${frame.errmsg}`);
+      if (frame.errcode !== 0) this.bot.warn(`回执异常 req_id=${reqId} errcode=${frame.errcode} errmsg=${frame.errmsg}`);
       return;
     }
 
@@ -533,11 +562,11 @@ class BotConnection {
       case 'aibot_msg_callback':
         return this.onMsgCallback(frame);
       case 'aibot_event_callback':
-        log('【事件】', JSON.stringify(maskBody(frame.body)));
+        this.bot.log('【事件】', JSON.stringify(maskBody(frame.body)));
         this.bot.store.append({ kind: 'event', req_id: reqId, body: frame.body });
         return;
       default:
-        log('【其他帧】', JSON.stringify(frame).slice(0, 500));
+        this.bot.log('【其他帧】', JSON.stringify(frame).slice(0, 500));
     }
   }
 
@@ -556,12 +585,12 @@ class BotConnection {
     const reqId = frame.headers?.req_id;
     // 企微重推（同 msgid、新 req_id）多半是上次没在 5 秒内收到回帧：不再落盘，但这次一定要回帧
     if (this.bot.isDuplicate(b.msgid)) {
-      log('重复消息，只回帧不落盘', b.msgid);
+      this.bot.log('重复消息，只回帧不落盘', b.msgid);
     } else {
       this.lastMsgAt = new Date().toISOString();
-      log('【收到消息】', JSON.stringify(maskBody(b)));
-      log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
-      if (b.msgtype === 'text') log('  文本=', b.text?.content);
+      this.bot.log('【收到消息】', JSON.stringify(maskBody(b)));
+      this.bot.log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
+      if (b.msgtype === 'text') this.bot.log('  文本=', b.text?.content);
       this.bot.store.append({ kind: 'message', req_id: reqId, body: b });
     }
 
@@ -575,9 +604,9 @@ class BotConnection {
       };
       try {
         this.send(reply);
-        log('  已回复:', text);
+        this.bot.log('  已回复:', text);
       } catch (e) {
-        warn('  回复失败:', e.message);
+        this.bot.warn('  回复失败:', e.message);
       }
     }
   }
@@ -603,31 +632,29 @@ function startOfflineAlert(bot) {
     if (!content) return;
     try {
       const resp = await conn.request({ cmd: 'aibot_send_msg', body: { chatid: bot.conf.adminUserId, chat_type: 1, msgtype: 'markdown', markdown: { content } } }, 10000);
-      if (resp.errcode === 0) log('离线告警已发送:', content);
-      else warn(`离线告警被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
+      if (resp.errcode === 0) bot.log('离线告警已发送:', content);
+      else bot.warn(`离线告警被拒 errcode=${resp.errcode} errmsg=${resp.errmsg}`);
     } catch (e) {
-      warn('离线告警失败:', e.message);
+      bot.warn('离线告警失败:', e.message);
     }
   };
   return setInterval(tick, Math.min(10000, mins * 60000));
 }
 
-/* ---------- HTTP API ---------- */
-function startHttpServer(bot) {
+/* ---------- HTTP API ----------
+ * 路由：/bots/<key>/… 指定 bot；/bots 是管理员总览；其余无前缀路径沿用 bots[0]，老客户端不用改。
+ * 鉴权：http.api_token = 管理员，任意 bot；bots[].api_token 只能访问自己。判定顺序 401 → 403 → 404，
+ * unknown bot 的 404 放在鉴权之后，免得未鉴权的人拿它探测 key 是否存在。
+ */
+function startHttpServer(bots) {
   if (!gw.httpPort) return null;
-  const conn = () => bot.conn;
-  const loopback = gw.httpHost === '127.0.0.1' || gw.httpHost === 'localhost' || gw.httpHost === '::1';
-  if (!loopback) {
-    // 正常部署不应走到这里：对外应由反代做 HTTPS。允许但必须有强 token，并明确警告。
-    if (!gw.apiToken || gw.apiToken.length < 32) {
-      console.error('http.host 对外监听时必须设置至少 32 字符的 http.api_token（建议 openssl rand -hex 32）');
-      process.exit(1);
-    }
-    warn(`HTTP API 以明文 HTTP 对外监听 ${gw.httpHost}，token 和 response_url 会在链路上裸奔；请改为 127.0.0.1 并用反代做 HTTPS`);
-  }
-  const tokenOk = (tok) => {
-    if (!tok) return false;
-    const a = Buffer.from(String(tok)), b = Buffer.from(gw.apiToken);
+  // 正常部署不应走到这里：对外应由反代做 HTTPS。token 强度已在加载配置时校验，这里只警告。
+  if (!isLoopback(gw.httpHost)) warn(`HTTP API 以明文 HTTP 对外监听 ${gw.httpHost}，token 和 response_url 会在链路上裸奔；请改为 127.0.0.1 并用反代做 HTTPS`);
+  const byKey = new Map(bots.map((b) => [b.key, b]));
+  const authOn = !!gw.apiToken || bots.some((b) => b.conf.apiToken);
+  const sameToken = (tok, expect) => {
+    if (!tok || !expect) return false;
+    const a = Buffer.from(String(tok)), b = Buffer.from(expect);
     return a.length === b.length && timingSafeEqual(a, b);
   };
   // 在反代后面时，真实来源在 X-Forwarded-For 第一段；直连时用 socket 地址
@@ -647,39 +674,53 @@ function startHttpServer(bot) {
     req.on('error', reject);
   });
 
+  const healthOf = (bot) => ({
+    ok: true,
+    connected: !!bot.conn?.ws && bot.conn.ws.readyState === 1,
+    subscribed: !!bot.conn?.subscribed,
+    last_msg_at: bot.conn?.lastMsgAt ?? null,
+    seq: bot.store.seq,
+    cursor: bot.store.cursor,
+    count: bot.store.items.length,
+    bot: bot.key,
+    agent_online: bot.agentOnline(),
+    agent_last_seen: iso(bot.presence.lastSeen),
+    last_agent: bot.presence.lastAgent || null,
+    last_ack_at: iso(bot.presence.lastAckAt),
+    pending: bot.pending(),
+  });
+
   const handler = async (req, res) => {
     const url = new URL(req.url, 'http://x');
-    if (gw.apiToken) {
+    const prefixed = url.pathname.match(/^\/bots\/([^/]+)(\/.*)$/);
+    const listAll = url.pathname === '/bots';
+    const bot = prefixed ? byKey.get(prefixed[1]) : listAll ? null : bots[0];
+    const pathname = prefixed ? prefixed[2] : url.pathname;
+    if (authOn) {
       const auth = req.headers.authorization || '';
       const tok = auth.startsWith('Bearer ') ? auth.slice(7) : url.searchParams.get('token');
-      if (!tokenOk(tok)) {
+      const admin = sameToken(tok, gw.apiToken);
+      const own = admin ? null : bots.find((b) => sameToken(tok, b.conf.apiToken));
+      if (!admin && !own) {
         warn(`API 鉴权失败 ip=${clientIp(req)} path=${url.pathname}`);
         return json(res, 401, { ok: false, error: 'unauthorized' });
       }
-    }
-    // 鉴权过了才认这个头：处理端每次来访都刷新在线状态
-    const agentId = req.headers['x-relay-agent'];
-    if (agentId) bot.touchAgent(agentId);
-    const store = bot.store;
-    try {
-      if (req.method === 'GET' && url.pathname === '/health') {
-        return json(res, 200, {
-          ok: true,
-          connected: !!conn()?.ws && conn().ws.readyState === 1,
-          subscribed: !!conn()?.subscribed,
-          last_msg_at: conn()?.lastMsgAt ?? null,
-          seq: store.seq,
-          cursor: store.cursor,
-          count: store.items.length,
-          bot: bot.key,
-          agent_online: bot.agentOnline(),
-          agent_last_seen: iso(bot.presence.lastSeen),
-          last_agent: bot.presence.lastAgent || null,
-          last_ack_at: iso(bot.presence.lastAckAt),
-          pending: bot.pending(),
-        });
+      // bot token 只管自己：总览、别的 bot、不存在的 key 一律 403（不透露 key 是否存在）
+      if (!admin && (listAll || own !== bot)) {
+        warn(`API 越权访问 ip=${clientIp(req)} token=${own.key} path=${url.pathname}`);
+        return json(res, 403, { ok: false, error: 'forbidden' });
       }
-      if (req.method === 'GET' && url.pathname === '/messages') {
+    }
+    if (prefixed && !bot) return json(res, 404, { ok: false, error: 'unknown bot' });
+    // 鉴权过了才认这个头：处理端每次来访都刷新请求所指那个 bot 的在线状态
+    const agentId = req.headers['x-relay-agent'];
+    if (agentId && bot) bot.touchAgent(agentId);
+    try {
+      if (req.method === 'GET' && listAll) return json(res, 200, { ok: true, bots: bots.map(healthOf) });
+      if (!bot) return json(res, 404, { ok: false, error: 'not found' });
+      const store = bot.store;
+      if (req.method === 'GET' && pathname === '/health') return json(res, 200, healthOf(bot));
+      if (req.method === 'GET' && pathname === '/messages') {
         const afterRaw = url.searchParams.get('after'), limitRaw = url.searchParams.get('limit');
         if ((afterRaw !== null && !/^\d+$/.test(afterRaw)) || (limitRaw !== null && !/^\d+$/.test(limitRaw))) {
           return json(res, 400, { ok: false, error: 'after/limit must be non-negative integers' });
@@ -690,12 +731,12 @@ function startHttpServer(bot) {
         const messages = store.list({ after, limit, kind });
         return json(res, 200, { ok: true, after, cursor: store.cursor, seq: store.seq, messages, next: messages.length ? messages[messages.length - 1].seq : after });
       }
-      const one = req.method === 'GET' && url.pathname.match(/^\/messages\/(\d+)$/);
+      const one = req.method === 'GET' && pathname.match(/^\/messages\/(\d+)$/);
       if (one) {
         const r = store.get(Number(one[1]));
         return r ? json(res, 200, { ok: true, message: r }) : json(res, 404, { ok: false, error: 'not found' });
       }
-      if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/ack') {
+      if ((req.method === 'GET' || req.method === 'POST') && pathname === '/ack') {
         const seq = Number(url.searchParams.get('seq'));
         if (!Number.isFinite(seq)) return json(res, 400, { ok: false, error: 'seq required' });
         bot.presence.lastAckAt = Date.now();
@@ -703,18 +744,18 @@ function startHttpServer(bot) {
         bot.saveState();
         return json(res, 200, { ok: true, cursor });
       }
-      if (req.method === 'POST' && url.pathname === '/send') {
+      if (req.method === 'POST' && pathname === '/send') {
         let body;
         try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { ok: false, error: 'invalid json' }); }
         // 企微拒绝、未订阅、等回执超时都返回 200：反代/Cloudflare 会把 5xx 换成自己的错误页，吞掉原因
         let resp;
         try {
-          resp = await conn().sendFrame({ cmd: 'aibot_send_msg', body });
+          resp = await bot.conn.sendFrame({ cmd: 'aibot_send_msg', body });
         } catch (e) {
-          warn(`/send 未能发出：${e.message}`);
+          bot.warn(`/send 未能发出：${e.message}`);
           return json(res, 200, { ok: false, error: e.message });
         }
-        if (resp.errcode !== 0) warn(`/send 被企微拒绝 errcode=${resp.errcode} errmsg=${resp.errmsg} body=${JSON.stringify(body).slice(0, 300)}`);
+        if (resp.errcode !== 0) bot.warn(`/send 被企微拒绝 errcode=${resp.errcode} errmsg=${resp.errmsg} body=${JSON.stringify(body).slice(0, 300)}`);
         return json(res, 200, { ok: resp.errcode === 0, resp });
       }
       return json(res, 404, { ok: false, error: 'not found' });
@@ -724,7 +765,7 @@ function startHttpServer(bot) {
   };
   const server = http.createServer(handler);
   server.listen(gw.httpPort, gw.httpHost, () => {
-    log(`HTTP API 监听 http://${gw.httpHost}:${server.address().port}${gw.apiToken ? '（需 token）' : '（无 token，仅限本机）'}`);
+    log(`HTTP API 监听 http://${gw.httpHost}:${server.address().port}${authOn ? '（需 token）' : '（无 token，仅限本机）'}`);
   });
   return server;
 }
@@ -739,7 +780,7 @@ for (const bot of bots) {
   const t = startOfflineAlert(bot);
   if (t) alertTimers.push(t);
 }
-const httpServer = startHttpServer(bots[0]);
+const httpServer = startHttpServer(bots);
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {

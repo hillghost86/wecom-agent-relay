@@ -7,6 +7,7 @@
       "key": "default",
       "bot_id": "<企微 Bot ID>",
       "secret": "<企微 Secret>",
+      "api_token": "",
       "reply_text": "已收到",
       "reply_text_offline": "已收到。处理端已离线 {duration}，上线后会处理",
       "admin_userid": "<收断线自报的 userid>",

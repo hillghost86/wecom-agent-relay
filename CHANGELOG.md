@@ -3,6 +3,22 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
+## 未发布
+
+### 新增
+- **多 bot**：`server/config.json` 的 `bots` 可以配多个机器人（每个必须有 `key`），同一个进程里每个 bot 各自一条连接、各自的数据文件（`default` 仍是 `messages.jsonl`，其他为 `messages.<key>.jsonl`）、游标、在线状态、断线自报和离线告警。两个 bot 的 `msg_log` 指向同一个文件时拒绝启动。
+- **前缀路由**：所有接口可加前缀 `/bots/<key>/`（如 `/bots/sales/messages`）；不带前缀的老路径指向 `bots` 里第一个，老客户端不用改。客户端接某个 bot 只需把 `api_base` 填成 `…/bots/<key>`，`client/` 代码未改。
+- **分级 token**：`http.api_token` 为管理员 token，可访问所有 bot；`bots[].api_token`（可选）只能访问自己那个 bot，越权返回 `403 forbidden`。判定顺序 401 → 403 → 404（管理员访问不存在的 key 返回 `404 unknown bot`）。bot token 不能与管理员 token 或彼此相同；对外监听时每个 token 都须至少 32 字符（原来只校验管理员 token，现在这项校验在加载配置时做，启动更早失败）。
+- `GET /bots`（仅管理员）：返回全部 bot 的 `/health`。
+- `X-Relay-Agent` 只记到请求路径指向的那个 bot 的在线状态。
+- 配置了多个 bot 时日志每行带 `[<key>]` 前缀；只有一个 bot 时日志与以前逐字相同。
+
+### 文档
+- `docs/config.md` 加 `bots[].api_token`、两级 token 与多机器人配置示例；`docs/api.md` 加「多 bot 路由」与 `GET /bots`；`docs/deploy.md` 加「加一个机器人」；`docs/presence.md`、`docs/roadmap.md`、`docs/agent-integration.md`、`server/README.md`、根 README 同步。`server/config.example.json` 的 `bots[0]` 加空的 `api_token`（留空即只用管理员 token）。
+
+### 测试
+- `test_mock.mjs` 从 39 项扩到 57 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀。
+
 ## v0.2.1 — 2026-09-24
 
 ### 文档

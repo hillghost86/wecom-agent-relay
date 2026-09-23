@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 目录 | 运行位置 | 说明 |
 |---|---|---|
-| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send`）。**唯一持久层**，它不在线消息就丢 |
+| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
 | `client/` | agent 所在机器 | `sentinel.mjs` 哨兵：轮询发现新消息即退出以唤醒对话式 agent；`poll.mjs`：拉取 / 单条取 / 回复 / 推送 / ack 的命令行工具 |
 | `skill/wecom-agent-relay/` | 随仓库分发 | WorkBuddy 技能：一句话安装引导 + 架构说明 + 排障手册。改接口、改部署步骤时要同步它 |
 | `docs/` | 随仓库分发 | 参考手册，入口 `docs/README.md` 按功能索引：`api.md` `config.md` `deploy.md` `protocol.md` `presence.md` `agent-integration.md` `roadmap.md`。找功能先看这里 |
@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 39 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载）
+node test_mock.mjs                       # 必做：起假网关跑 57 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
 node index.mjs                           # 本地跑一个真连接，读工作目录下的 config.json（注意：会踢掉 VPS 上的连接，只在用户同意时跑）
 
 # —— client/ ——（只读验证，需要 WECOM_API_BASE / WECOM_API_TOKEN 环境变量或 client/config.json）
@@ -43,7 +43,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 ## 协议与部署事实（全部实测过，别按常识猜）
 
 - 企微 API 模式二选一：长连接 or 回调 URL。本项目用长连接，不需要域名备案、不需要解密。
-- **一个机器人同一时刻只能有一条 WS 连接**，新连接踢旧连接，被踢方收到 `disconnected_event`。所以本地绝不能和 VPS 同时跑 `server/index.mjs`。
+- **一个机器人同一时刻只能有一条 WS 连接**，新连接踢旧连接，被踢方收到 `disconnected_event`。所以本地绝不能用生产 bot 的凭证跑 `server/index.mjs`；只有测试 bot 可以（见硬规则 4 的例外）。
 - **机器人离线期间的消息企微直接丢，且发送方显示发送成功。** 重启服务就是一个几秒的空窗，改完代码要挑没人用的时候部署，并在回复里提醒。`ADMIN_USERID` 配了会在重连后自报离线时段。
 - 收到消息 5 秒内必须回一帧；进程自动回 `stream(finish=true)` 的「已收到」占位。
 - agent 回复走消息自带的 `response_url`：1 小时内有效、只能调一次、`msgtype` 只认 `markdown`（`text` 会被拒）、HTTP 200 不代表成功要看 body 的 `errcode`、群聊自动引用原消息。和「已收到」互不影响，用户看到两条。
@@ -66,6 +66,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 2. **高风险改动先讲方案、等用户明确确认，再动手**：鉴权与 token 逻辑、对企微发消息的路径（自动回复、`/send`、断线自报）、会导致服务重启的部署、`config.json` 配置项的语义变更。这四类每个关键节点单独停下来说清做法和影响。
 3. **改完 `server/index.mjs` 必跑** `node --check` 和 `node test_mock.mjs`，新行为必须在 `test_mock.mjs` 里有断言；改完 `client/*.mjs` 同样跑 `server/test_mock.mjs`（含 client 断言），再对真网关做一次只读验证。**只读验证用 `client/sentinel.mjs --status` 或不带 `X-Relay-Agent` 头的 curl**，不要用 `poll.mjs`：它带头会把这台机器记成处理端在线，污染线上 presence。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
+   **例外：测试 bot**（2026-09-24 用户授权）。对 key 为 `test` 的机器人，我可以自行调 `/send`、`--reply`、`--ack`、带 `X-Relay-Agent` 的请求，也可以在本机用 `server/config.test.json` 跑服务端连它做真实联调（会挤掉 VPS 上测试 bot 的连接，不影响生产 bot）。测试 bot 的凭证只在本机 `server/config.test.json` 和 `client/config.json`，不入仓。生产 bot 仍按本条执行。
 5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` + `systemctl restart` 命令，并提醒重启会丢那几秒的消息。
 6. **不覆盖用户未提交的改动**：`git status` / `git diff` 先看；禁止 `git checkout -- <路径>`、`git restore`、`git reset --hard`、`git clean -f`、未经同意的 `git stash`。要看历史版本用 `git show <ref>:<path>`。
 7. **移动 / 改名 / 删除文件后全仓更新引用**：`grep -r '旧文件名'`，README、注释、systemd 单元、`.gitignore` 里的路径逐处改，零残留再收工。

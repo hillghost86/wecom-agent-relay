@@ -10,6 +10,8 @@
 
 agent 处理期间哨兵不在，但消息照样落在 VPS 上，重挂后从上次位置接着发现，不会漏。
 
+网关配了多个机器人时，一个 agent 接一个机器人：把 `client/config.json` 的 `api_base` 填成 `https://your-domain.example.com/bots/<key>`，`api_token` 填这个机器人的 token，哨兵和 `poll.mjs` 就只看这个机器人的消息和游标，代码不用改（见 [config.md § 客户端](config.md#客户端-clientconfigjson)）。
+
 ## 哨兵 sentinel.mjs
 
 ```bash

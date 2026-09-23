@@ -70,6 +70,21 @@ ssh <vps> 'sudo systemctl restart wecom-bot && sleep 5 && journalctl -u wecom-bo
 
 `wecom-bot.service` 有变化时（看 CHANGELOG），多做一步 `sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload`。`package.json` 依赖有变化时再跑一次 `npm i`。
 
+## 加一个机器人
+
+多个机器人跑在同一个进程里，共用一个端口和反代，接口用前缀 `/bots/<key>/` 区分（见 [api.md § 多 bot 路由](api.md#多-bot-路由)）。
+
+1. 企微后台再建一个智能机器人，同样开 API 模式、选长连接，记下它的 Bot ID 和 Secret。
+2. 编辑 VPS 上的 `config.json`，在 `bots` 里加一项，写上 `key`（如 `sales`）、`bot_id`、`secret`，以及给接这个机器人的 agent 用的 `api_token`（`openssl rand -hex 32`，不能和 `http.api_token` 或别的 bot 相同）。原来那个机器人要是还没写 `key`，补上 `"key": "default"`，它的数据文件仍是 `messages.jsonl`，不用迁移。字段说明见 [config.md § 配置多个机器人](config.md#配置多个机器人)。
+3. 重启：`sudo systemctl restart wecom-bot`。**所有机器人都会有几秒空窗**，挑没人用的时候做。日志里每个机器人各有一行 `[<key>] 订阅成功，开始心跳`。
+4. 接这个机器人的客户端，`client/config.json` 的 `api_base` 填 `https://your-domain.example.com/bots/<key>`，`api_token` 填第 2 步那个 token。客户端代码不用改。
+
+验证（管理员 token 能看到所有机器人的状态）：
+
+```bash
+curl -s -H "Authorization: Bearer <http.api_token>" https://your-domain.example.com/bots
+```
+
 ## 从 .env 迁移到 config.json
 
 v0.2.0 起配置改为 `config.json`。本机可以用下面的脚本把旧 `.env` 转成 `config.json`，也可以照 [config.md § 兼容期](config.md#兼容期环境变量) 的对照表手填：
@@ -95,7 +110,7 @@ require("fs").writeFileSync("config.json",JSON.stringify(c,null,2));' && chmod 6
 
 ## 数据文件
 
-都在 `msg_log` 旁边（默认工作目录）：
+都在 `msg_log` 旁边（默认工作目录）。多个机器人时，key 不是 `default` 的那些文件名是 `messages.<key>.jsonl` 及其 `.state.json` / `.alive`：
 
 | 文件 | 内容 | 能不能删 |
 |---|---|---|

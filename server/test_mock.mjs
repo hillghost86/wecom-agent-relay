@@ -10,6 +10,8 @@
  *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数、只有事件时不唤醒、pending 不计事件
  *   9. presence：X-Relay-Agent 记在线、/health 带出状态、离线时自动回复分档、管理员离线告警
  *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载
+ *  12. 多 bot：另起一个两 bot 的服务端进程，验证各自连接与落盘、/bots/<key>/ 前缀路由、两级 token（401/403/404）、
+ *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -19,6 +21,7 @@ import path from 'node:path';
 import net from 'node:net';
 
 const BOT_ID = 'aibTEST', SECRET = 'sec-TEST';
+const BOT2_ID = 'aibTEST2', SECRET2 = 'sec-TEST2';   // 第 12 节多 bot 的第二个机器人
 const tmpLog = path.join(os.tmpdir(), `wecom-msgs-${process.pid}.jsonl`);
 let pass = 0, fail = 0;
 const check = (ok, label, extra = '') => { console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}${extra ? '  ' + extra : ''}`); ok ? pass++ : fail++; };
@@ -32,15 +35,17 @@ const httpPort = await new Promise((r) => { const srv = net.createServer(); srv.
 const API_TOKEN = 'test-token';
 const wss = new WebSocketServer({ port: 0 });
 const port = wss.address().port;
-const conns = [];           // 每次连接的记录 { ws, frames[] }
-wss.on('connection', (ws) => {
-  const rec = { ws, frames: [] };
+const conns = [];           // 每次连接的记录 { ws, frames[], path, botId }
+// path 区分是哪个服务端进程连来的（多 bot 进程用 /multi），botId 记订阅成功的是哪个机器人
+wss.on('connection', (ws, req) => {
+  const rec = { ws, frames: [], path: req.url, botId: null };
   conns.push(rec);
   ws.on('message', (raw) => {
     const f = JSON.parse(raw.toString());
     rec.frames.push(f);
     if (f.cmd === 'aibot_subscribe') {
-      const ok = f.body?.bot_id === BOT_ID && f.body?.secret === SECRET;
+      const ok = (f.body?.bot_id === BOT_ID && f.body?.secret === SECRET) || (f.body?.bot_id === BOT2_ID && f.body?.secret === SECRET2);
+      if (ok) rec.botId = f.body.bot_id;
       ws.send(JSON.stringify({ headers: { req_id: f.headers.req_id }, errcode: ok ? 0 : 40001, errmsg: ok ? 'ok' : 'invalid secret' }));
     } else if (f.cmd === 'ping') {
       ws.send(JSON.stringify({ headers: { req_id: f.headers.req_id }, errcode: 0, errmsg: 'ok' }));
@@ -75,6 +80,7 @@ const child = spawn(process.execPath, ['index.mjs', '--config', cfgFile], {
 let childOut = '';
 child.stdout.on('data', (d) => { childOut += d; });
 child.stderr.on('data', (d) => { childOut += d; });
+let multiChild = null, multiDir = null, multiOut = '';   // 第 12 节，finally 里清理
 
 try {
   // 1. 订阅
@@ -271,11 +277,105 @@ try {
   check(envOk && /环境变量方式将在下个版本移除/.test(envOut), '无 config.json 时从环境变量兼容加载并给出迁移警告', envOut.split('\n').find((l) => /环境变量/.test(l)) || envOut.slice(0, 200));
   envChild.kill('SIGTERM');
   fs.rmSync(envDir, { recursive: true, force: true });
+
+  // 12. 多 bot：另起一个进程，两个 bot（default 用 BOT_ID，test 用 BOT2_ID），test 有自己的 token，顶层是管理员 token
+  multiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-multi-'));
+  const mPort = await new Promise((r) => { const srv = net.createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => r(p)); }); });
+  const ADMIN_TOKEN = 'multi-admin-token', TEST_TOKEN = 'multi-test-token';
+  const mLogDefault = path.join(multiDir, 'messages.jsonl'), mLogTest = path.join(multiDir, 'messages.test.jsonl');
+  const mBots = [
+    { key: 'default', bot_id: BOT_ID, secret: SECRET, msg_log: mLogDefault },
+    { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN, msg_log: mLogTest },
+  ];
+  const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, bots: mBots, ...over });
+  const mCfgFile = path.join(multiDir, 'config.json');
+  fs.writeFileSync(mCfgFile, JSON.stringify(mCfg(), null, 2));
+  multiChild = spawn(process.execPath, [path.join(serverDir, 'index.mjs'), '--config', mCfgFile], { cwd: multiDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  multiChild.stdout.on('data', (d) => { multiOut += d; });
+  multiChild.stderr.on('data', (d) => { multiOut += d; });
+  const mConn = (id) => conns.find((c) => c.path === '/multi' && c.botId === id);
+  await waitFor(() => mConn(BOT_ID) && mConn(BOT2_ID), 8000);
+  check(conns.filter((c) => c.path === '/multi' && c.botId).length === 2, '多 bot：两个 bot 各自一条连接，订阅帧的 bot_id 各自正确');
+
+  const mBase = `http://127.0.0.1:${mPort}`;
+  const mj = async (p, token, headers = {}) => { const r = await fetch(mBase + p, { headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers } }); return { status: r.status, body: await r.json() }; };
+  const mPush = async (id, msgid) => {
+    mConn(id).ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: `REQ-${msgid}` }, body: { msgid, chattype: 'single', from: { userid: 'u1' }, msgtype: 'text', text: { content: msgid } } }));
+    await waitFor(() => mConn(id).frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === `REQ-${msgid}`));
+  };
+
+  await mPush(BOT2_ID, 'MSG-T1');
+  const readLog = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf-8') : '');
+  check(readLog(mLogTest).includes('MSG-T1') && !readLog(mLogDefault).includes('MSG-T1'), '多 bot：推给 test 的消息只落 test 的 msg_log');
+  const mt = await mj('/bots/test/messages', ADMIN_TOKEN), md = await mj('/bots/default/messages', ADMIN_TOKEN);
+  check(mt.body.messages?.length === 1 && mt.body.messages[0].body.msgid === 'MSG-T1' && md.body.messages?.length === 0, '多 bot：/bots/test/messages 拿得到，/bots/default/messages 拿不到',
+    `test=${mt.body.messages?.length} default=${md.body.messages?.length}`);
+
+  const tOwn = await mj('/bots/test/health', TEST_TOKEN);
+  check(tOwn.status === 200 && tOwn.body.bot === 'test', 'bot token 访问自己的 /bots/test/health 200');
+  const tOther = await mj('/bots/default/health', TEST_TOKEN), tAll = await mj('/bots', TEST_TOKEN), tBare = await mj('/health', TEST_TOKEN);
+  check([tOther, tAll, tBare].every((x) => x.status === 403 && x.body.error === 'forbidden'), 'bot token 访问别的 bot / GET /bots / 无前缀 /health（指向 default）都是 403',
+    `${tOther.status} ${tAll.status} ${tBare.status}`);
+
+  const aAll = await mj('/bots', ADMIN_TOKEN);
+  check(aAll.status === 200 && aAll.body.bots?.length === 2 && aAll.body.bots[0].bot === 'default' && aAll.body.bots[1].bot === 'test' && aAll.body.bots[1].subscribed === true,
+    '管理员 GET /bots 返回两个 bot 的 /health', JSON.stringify(aAll.body.bots?.map((b) => ({ bot: b.bot, seq: b.seq, subscribed: b.subscribed }))));
+  const aBare = await mj('/health', ADMIN_TOKEN);
+  check(aBare.status === 200 && aBare.body.bot === 'default', '管理员访问无前缀 /health 指向第一个 bot（default）');
+
+  const wrong = await mj('/bots/test/health', 'wrong-token');
+  check(wrong.status === 401, '错误 token 401');
+  const nope = await mj('/bots/nope/health', ADMIN_TOKEN);
+  check(nope.status === 404 && nope.body.error === 'unknown bot', '管理员访问不存在的 bot 返回 404 unknown bot');
+  const nopeAnon = await mj('/bots/nope/health');
+  check(nopeAnon.status === 401, '无 token 访问不存在的 bot 是 401 而不是 404（不暴露 key 是否存在）', `status=${nopeAnon.status}`);
+
+  await mj('/bots/test/health', TEST_TOKEN, { 'x-relay-agent': 't-agent' });
+  const pAll = (await mj('/bots', ADMIN_TOKEN)).body.bots;
+  check(pAll[1].last_agent === 't-agent' && pAll[1].agent_online === true && pAll[0].last_agent === null && pAll[0].agent_online === null,
+    'X-Relay-Agent 只记到请求路径指向的 bot', JSON.stringify(pAll.map((b) => ({ bot: b.bot, last_agent: b.last_agent, agent_online: b.agent_online }))));
+
+  // client 零改动：api_base 带 /bots/test，拿 test 的消息、推进 test 的游标；default 那边有一条消息，游标不该动
+  await mPush(BOT2_ID, 'MSG-T2');
+  await mPush(BOT_ID, 'MSG-D1');
+  const mcdir = fs.mkdtempSync(path.join(multiDir, 'client-'));
+  for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../client/${f}`, import.meta.url), path.join(mcdir, f));
+  const mRun = (script, ...a) => {
+    try { return execFileSync(process.execPath, [path.join(mcdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: `${mBase}/bots/test`, WECOM_API_TOKEN: TEST_TOKEN, WECOM_AGENT_ID: 't-agent' }, encoding: 'utf-8', timeout: 10000 }); }
+    catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
+  };
+  const ms1 = mRun('sentinel.mjs', '--once');
+  check(/NEW_MSG count=2 seq=1-2/.test(ms1), 'client 零改动：sentinel 用 api_base=…/bots/test 拿到 test 的消息', ms1.trim().split('\n').pop());
+  const mp1 = mRun('poll.mjs', '--ack');
+  const cAll = (await mj('/bots', ADMIN_TOKEN)).body.bots;
+  check(/已 ack 到 seq=2/.test(mp1) && cAll[1].cursor === 2 && cAll[0].cursor === 0 && cAll[0].seq === 1, 'client 零改动：poll.mjs --ack 只推进 test 的游标，default 游标不变',
+    `test cursor=${cAll[1].cursor} default cursor=${cAll[0].cursor} seq=${cAll[0].seq}`);
+
+  // 多 bot 配置校验：都在加载配置时退出，不会连网关
+  const badCases = [
+    ['bot token 与顶层 token 相同', mCfg({ bots: [mBots[0], { ...mBots[1], api_token: ADMIN_TOKEN }] }), /api_token 不能和 http\.api_token 相同/],
+    ['两个 bot 的 bot token 相同', mCfg({ bots: [{ ...mBots[0], api_token: TEST_TOKEN }, mBots[1]] }), /api_token 和别的机器人重复/],
+    ['两个 bot 的 msg_log 指向同一文件', mCfg({ bots: [mBots[0], { ...mBots[1], msg_log: mLogDefault }] }), /msg_log .*同一个文件/],
+    ['对外监听时 bot token 不足 32 字符', mCfg({ http: { host: '0.0.0.0', port: mPort, api_token: 'a'.repeat(32) } }), /（test）: http\.host 对外监听时 api_token 必须至少 32 字符/],
+  ];
+  for (const [label, cfg, re] of badCases) {
+    const f = path.join(multiDir, 'bad.json');
+    fs.writeFileSync(f, JSON.stringify(cfg));
+    const r = spawnSync(process.execPath, [path.join(serverDir, 'index.mjs'), '--config', f], { cwd: multiDir, encoding: 'utf-8', timeout: 5000 });
+    check(r.status !== 0 && re.test(r.stderr || ''), `多 bot 配置校验：${label}时启动失败`, `exit=${r.status} ${(r.stderr || '').trim().split('\n').pop()}`);
+  }
+
+  check(/\[test\] 订阅成功，开始心跳/.test(multiOut) && /\[default\] 订阅成功/.test(multiOut) && /Z 订阅成功，开始心跳/.test(childOut) && !/\[default\]/.test(childOut),
+    '多 bot 时日志带 [key] 前缀，单 bot 时不带', multiOut.split('\n').find((l) => /\[test\] 订阅成功/.test(l)));
 } catch (e) {
   check(false, '异常: ' + e.message);
   console.log('--- 客户端输出 ---\n' + childOut);
+  if (multiOut) console.log('--- 多 bot 进程输出 ---\n' + multiOut);
 } finally {
   child.kill('SIGTERM');
+  // 等它退出再删目录：退出时会写 .state.json / .alive，和删除赛跑会 ENOTEMPTY
+  if (multiChild && multiChild.exitCode === null) { const exited = new Promise((r) => multiChild.once('exit', r)); multiChild.kill('SIGTERM'); await exited; }
+  if (multiDir) fs.rmSync(multiDir, { recursive: true, force: true });
   wss.close();
   try { fs.unlinkSync(tmpLog); } catch {}
   try { fs.unlinkSync(tmpLog + '.state.json'); } catch {}

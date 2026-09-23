@@ -15,7 +15,7 @@ cp config.example.json config.json   # 填 bot_id、secret、http.api_token（op
 node index.mjs                       # 默认读工作目录下的 config.json；别的位置用 --config <路径>
 ```
 
-配置项和默认值见 `config.example.json`。**本版本只支持 `bots` 里的一个机器人。**
+配置项和默认值见 `config.example.json`。`bots` 里可以配多个机器人，写法见 [docs/config.md § 配置多个机器人](../docs/config.md#配置多个机器人)。
 
 看到 `订阅成功，开始心跳` 后在企微里 @机器人 说话，终端会打印明文，企微收到自动回复「已收到」。
 
@@ -38,6 +38,8 @@ journalctl -u wecom-bot -f
 
 请求头带 `Authorization: Bearer <api_token>`。再带一个 `X-Relay-Agent: <agent_id>`，
 网关就把这次请求记成「处理端露了一面」，用来判在线（见下文「处理端在线状态」）；不带也能正常调，只是不算在线。
+
+配了多个机器人时，下表每个接口都可加前缀 `/bots/<key>` 指定机器人，不带前缀指向 `bots` 里第一个；管理员 token（`http.api_token`）另有 `GET /bots` 看全部机器人状态，bot token（`bots[].api_token`）只能访问自己那个。详见 [docs/api.md § 多 bot 路由](../docs/api.md#多-bot-路由)。
 
 | 接口 | 作用 |
 |---|---|
@@ -110,7 +112,7 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 ## 自测
 
 ```bash
-node test_mock.mjs     # 起假网关，39 项断言（含 client/ 两个脚本、presence、配置加载）
+node test_mock.mjs     # 起假网关，57 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
 ```
 
 ## 文件
