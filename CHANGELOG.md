@@ -3,7 +3,7 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
-## 未发布
+## v0.2.0 — 2026-09-24
 
 ### 变更
 - **服务端配置从环境变量迁到 `config.json`**（结构见 `server/config.example.json`：顶层 `http` / `tz` / `agent_online_secs`，机器人放在 `bots` 列表，本版本只允许一个）。
