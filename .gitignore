@@ -4,7 +4,7 @@ config.json
 config.*.json
 !config.example.json
 sentinel_cursor.json
-messages/
+bots/
 # 显式把 msg_log 配到部署根目录时的文件名
 messages.jsonl*
 messages.*.jsonl*

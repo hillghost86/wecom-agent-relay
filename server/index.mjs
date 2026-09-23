@@ -139,8 +139,8 @@ function normalizeConfig(raw, source) {
     seenKeys.add(key);
     if (!b.bot_id) errs.push(`${at}: 缺少 bot_id`);
     if (!b.secret) errs.push(`${at}: 缺少 secret`);
-    // 默认数据文件：统一放 messages/ 目录，按 key 命名（default 也一样）
-    const msgLog = b.msg_log ?? path.join(process.cwd(), 'messages', `messages.${key}.jsonl`);
+    // 默认数据文件：每个 bot 一个目录 bots/<key>/，以后媒体下载的 files/ 也放在这个目录下
+    const msgLog = b.msg_log ?? path.join(process.cwd(), 'bots', key, 'messages.jsonl');
     return {
       key,
       botId: b.bot_id || '',

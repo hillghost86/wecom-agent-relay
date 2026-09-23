@@ -71,7 +71,7 @@
 ## 部署
 
 ### 网关频繁掉线重连
-- 两处跑了这个网关（新连接踢旧连接）：`systemctl status wecom-bot` 只留一处。被踢时 `messages/messages.<key>.jsonl` 里会多一条 `kind=event`、`eventtype=disconnected_event` 的记录，看到它就是这个原因
+- 两处跑了这个网关（新连接踢旧连接）：`systemctl status wecom-bot` 只留一处。被踢时 `bots/<key>/messages.jsonl` 里会多一条 `kind=event`、`eventtype=disconnected_event` 的记录，看到它就是这个原因
 - VPS 出网被防火墙拦 wss
 
 ### 收不到群消息
@@ -85,5 +85,5 @@
 ## agent 闭环
 
 ### agent 处理完忘了重挂哨兵
-- 症状：之后的消息没人响应，但 VPS 的 messages/messages.<key>.jsonl 在涨
+- 症状：之后的消息没人响应，但 VPS 的 bots/<key>/messages.jsonl 在涨
 - 处理：重新挂起哨兵即可，消息会从哨兵游标继续发现；已处理确认靠服务端 /ack 游标

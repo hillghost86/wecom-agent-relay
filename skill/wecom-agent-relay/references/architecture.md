@@ -7,7 +7,7 @@
    │ wss 长连接（aibot_subscribe 鉴权，30s 心跳，断线自动重连）
    ▼
 VPS 网关（server/index.mjs，systemd 常驻）
-   │ 收到 aibot_msg_callback → 毫秒级追加 messages/messages.<key>.jsonl
+   │ 收到 aibot_msg_callback → 毫秒级追加 bots/<key>/messages.jsonl
    │ HTTPS API：/health /messages /messages/<seq> /ack /send（Bearer API_TOKEN）
    ▼
 本机哨兵（client/sentinel.mjs，agent 的后台任务）
@@ -28,7 +28,7 @@ agent：GET /messages/<seq> 取消息 → 按内容处理 → POST body.response
 实测结论：**企业微信会静默丢弃智能机器人不在线期间的消息**——长连接模式没有官方的
 「离线消息保留/重推」承诺（协议里 msgid 仅用于事件排重，不构成重推保证）。
 agent 所在电脑会关机、断网、WorkBuddy 会关闭，因此消息可靠性只能由一台
-在线率接近 100% 的 VPS 保证。messages/messages.<key>.jsonl 是整个系统唯一的消息持久层。
+在线率接近 100% 的 VPS 保证。bots/<key>/messages.jsonl 是整个系统唯一的消息持久层。
 
 ### 2. 为什么哨兵靠「退出」唤醒 agent
 

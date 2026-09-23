@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 目录 | 运行位置 | 说明 |
 |---|---|---|
-| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages/messages.<key>.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
+| `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `bots/<key>/messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send` `/bots`）。**唯一持久层**，它不在线消息就丢 |
 | `client/` | agent 所在机器 | `sentinel.mjs` 哨兵：轮询发现新消息即退出以唤醒对话式 agent；`poll.mjs`：拉取 / 单条取 / 回复 / 推送 / ack 的命令行工具 |
 | `skill/wecom-agent-relay/` | 随仓库分发 | WorkBuddy 技能：一句话安装引导 + 架构说明 + 排障手册。改接口、改部署步骤时要同步它 |
 | `docs/` | 随仓库分发 | 参考手册，入口 `docs/README.md` 按功能索引：`api.md` `config.md` `deploy.md` `protocol.md` `presence.md` `agent-integration.md` `roadmap.md`。找功能先看这里 |

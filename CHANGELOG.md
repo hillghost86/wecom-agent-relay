@@ -6,10 +6,10 @@
 ## 未发布
 
 ### 变更
-- **默认消息文件位置改为 `messages/messages.<key>.jsonl`**（单 bot 即 `messages/messages.default.jsonl`，`.state.json` / `.alive` 跟着进 `messages/`，目录启动时自动建）。**不兼容旧位置，升级前必须按 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级消息文件搬进-messages-目录) 手工搬移，否则网关会从 seq 0 重新开始。** 显式写了 `msg_log` 的配置不受影响。
+- **默认消息文件位置改为 `bots/<key>/messages.jsonl`**（单 bot 即 `bots/default/messages.jsonl`，`.state.json` / `.alive` 跟着进同一目录，目录启动时自动建；同目录下的 `files/` 预留给以后的媒体下载）。**不兼容旧位置，升级前必须按 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级数据文件搬进-botskey) 手工搬移，否则网关会从 seq 0 重新开始。** 显式写了 `msg_log` 的配置不受影响。
 
 ### 新增
-- **多 bot**：`server/config.json` 的 `bots` 可以配多个机器人（每个必须有 `key`），同一个进程里每个 bot 各自一条连接、各自的数据文件（`messages/messages.<key>.jsonl`，见上面「变更」）、游标、在线状态、断线自报和离线告警。两个 bot 的 `msg_log` 指向同一个文件时拒绝启动。
+- **多 bot**：`server/config.json` 的 `bots` 可以配多个机器人（每个必须有 `key`），同一个进程里每个 bot 各自一条连接、各自的数据文件（`bots/<key>/messages.jsonl`，见上面「变更」）、游标、在线状态、断线自报和离线告警。两个 bot 的 `msg_log` 指向同一个文件时拒绝启动。
 - **前缀路由**：所有接口可加前缀 `/bots/<key>/`（如 `/bots/sales/messages`）；不带前缀的老路径指向 `bots` 里第一个，老客户端不用改。客户端接某个 bot 只需把 `api_base` 填成 `…/bots/<key>`，`client/` 代码未改。
 - **分级 token**：`http.api_token` 为管理员 token，可访问所有 bot；`bots[].api_token`（可选）只能访问自己那个 bot，越权返回 `403 forbidden`。判定顺序 401 → 403 → 404（管理员访问不存在的 key 返回 `404 unknown bot`）。bot token 不能与管理员 token 或彼此相同；对外监听时每个 token 都须至少 32 字符（原来只校验管理员 token，现在这项校验在加载配置时做，启动更早失败）。
 - `GET /bots`（仅管理员）：返回全部 bot 的 `/health`。
