@@ -2,7 +2,7 @@
 
 常驻 VPS 的 WebSocket 客户端：连企业微信智能机器人的长连接网关收消息，落盘到 `messages.jsonl`，
 通过 HTTP API 供本机 agent 拉取。企微会静默丢弃机器人离线期间的消息，这台 7×24 在线的 VPS 是唯一持久层。
-整体架构和客户端用法见[仓库根 README](../README.md)。
+整体架构和客户端用法见[仓库根 README](../README.md)；每个接口的字段、每个配置项的含义、升级与迁移步骤见 [docs/](../docs/README.md)。
 
 ## 快速开始
 

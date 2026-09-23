@@ -5,6 +5,9 @@
 
 ## 未发布
 
+### 文档
+- 新增 `docs/` 参考手册，入口 `docs/README.md` 按「我想查什么」和功能索引：HTTP API 完整字段（含消息记录格式）、服务端与客户端全部配置项、部署 / 升级 / `.env` 迁移、企微协议事实（标注文档 / 实测 / 推断，含媒体文件解密方法）、处理端在线状态、agent 接入与 `poll.mjs` 命令表、路线图。根 README、`server/README.md`、CLAUDE.md 指向它。
+
 ### 变更
 - `client/sentinel.mjs` 只对真消息（`kind=message`）唤醒：新 seq 里全是 `enter_chat` 等事件时只推进本地 `last_seen`、不退出（`--once` 打印 `NO_MSG`）；
   `NEW_MSG` 的 `count` 和 `seq` 区间只算真消息，格式不变。查询 `/messages` 失败时按旧逻辑当作全是真消息唤醒，宁可多唤醒不漏处理。

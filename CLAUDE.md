@@ -13,6 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `server/` | VPS，systemd 常驻 | `index.mjs`：连企微 WebSocket 长连接收消息，落盘 `messages.jsonl`，对本机暴露 HTTP API（`/health` `/messages` `/messages/<seq>` `/ack` `/send`）。**唯一持久层**，它不在线消息就丢 |
 | `client/` | agent 所在机器 | `sentinel.mjs` 哨兵：轮询发现新消息即退出以唤醒对话式 agent；`poll.mjs`：拉取 / 单条取 / 回复 / 推送 / ack 的命令行工具 |
 | `skill/wecom-agent-relay/` | 随仓库分发 | WorkBuddy 技能：一句话安装引导 + 架构说明 + 排障手册。改接口、改部署步骤时要同步它 |
+| `docs/` | 随仓库分发 | 参考手册，入口 `docs/README.md` 按功能索引：`api.md` `config.md` `deploy.md` `protocol.md` `presence.md` `agent-integration.md` `roadmap.md`。找功能先看这里 |
 | `archive/` | 本地 | 早期 URL 回调 Worker 方案，已 `.gitignore`，不公开、不维护 |
 
 纯 Node（≥ 18），无框架。`server/` 唯一依赖 `ws`；`client/` 零依赖。
@@ -77,7 +78,7 @@ sudo systemctl restart wecom-bot && journalctl -u wecom-bot -n 20 --no-pager
 - 纯 ESM `.mjs`，无构建步骤，无 TypeScript；配置全部走 `config.json`（`server/` 的路径用 `--config` 指定，默认工作目录；`client/` 用同目录 config.json，环境变量可覆盖），启动时缺必填项直接报错退出。
 - 注释只写「为什么」不写「是什么」，用中文，一两行说清；协议坑点写在函数头注释里而不是散落各处。
 - 日志：`log` / `warn` 带 ISO 时间戳；不打印 Secret、token、完整 `response_url`（只打尾部几位）。
-- 文档同步：改接口、改 `config.json` 配置项、发现新的协议事实，同一次改动里更新 `README.md`（总览）和 `server/README.md`（部署与接口），两份各管各的，别重复大段。
+- 文档同步：改接口、改 `config.json` 配置项、发现新的协议事实，同一次改动里更新对应的 `docs/*.md`（完整参考），再看 `README.md`（总览）和 `server/README.md`（部署速查）要不要跟着改。新协议事实写进 `docs/protocol.md` 并标「文档 / 实测 / 推断」和日期；路线图结论写进 `docs/roadmap.md`。各份分工见 `docs/README.md` 末尾，别重复大段。
 - 写代码风格对齐周边既有代码（命名、注释密度、惯用法）。
 
 ## 工作流

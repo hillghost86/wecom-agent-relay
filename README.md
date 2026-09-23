@@ -34,9 +34,14 @@ VPS 网关 server/（7×24 在线，唯一持久层 messages.jsonl）
   离线回「已收到。处理端已离线 X 小时，上线后会处理」，而不是让人干等。管理员则能在 `/health` 里
   一眼看到三层状态——企微连接在不在（`subscribed`）、处理端在不在（`agent_online`）、积压多少（`pending`）。
 
+## 文档
+
+完整参考手册在 [docs/](docs/README.md)，按「我想查什么」索引：HTTP API 字段、配置项、部署升级、企微协议事实、处理端在线状态、agent 接入、路线图。
+
 ## 目录
 
 ```
+├── docs/                     参考手册（入口 docs/README.md）
 ├── server/                   VPS 长连接网关（部署说明见 server/README.md）
 ├── client/
 │   ├── sentinel.mjs          事件哨兵（本机，agent 后台任务）
