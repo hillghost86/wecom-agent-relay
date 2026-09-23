@@ -318,8 +318,11 @@ class Bot {
     return last ? Math.round((Date.now() - last) / 1000) : 0;
   }
 
+  // 只数真消息：enter_chat 等事件也占 seq，算进积压会让离线告警误报
   pending() {
-    return Math.max(0, this.store.seq - this.store.cursor);
+    let n = 0;
+    for (const r of this.store.items) if (r.seq > this.store.cursor && r.kind === 'message') n++;
+    return n;
   }
 
   /** 企微可能重推同一条消息 */

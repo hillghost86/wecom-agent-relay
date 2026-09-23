@@ -3,6 +3,14 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
+## 未发布
+
+### 变更
+- `client/sentinel.mjs` 只对真消息（`kind=message`）唤醒：新 seq 里全是 `enter_chat` 等事件时只推进本地 `last_seen`、不退出（`--once` 打印 `NO_MSG`）；
+  `NEW_MSG` 的 `count` 和 `seq` 区间只算真消息，格式不变。查询 `/messages` 失败时按旧逻辑当作全是真消息唤醒，宁可多唤醒不漏处理。
+- `/health` 的 `pending` 只数未 ack 的真消息，事件不计入积压（离线告警同样按这个数判断）。
+- `test_mock.mjs` 从 36 项扩到 39 项，新增只有事件时不唤醒、`pending` 不计事件、事件后真消息的 seq 区间断言。
+
 ## v0.2.0 — 2026-09-24
 
 ### 变更

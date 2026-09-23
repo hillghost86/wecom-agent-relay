@@ -134,14 +134,14 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 
 | 输出 | 含义 |
 |---|---|
-| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），`agent` 是本机的处理端标识 |
+| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），`agent` 是本机的处理端标识；只算真消息，`enter_chat` 等事件不唤醒 |
 | `NO_MSG ...` | `--once` 模式下无新消息 |
 
 ## HTTP API（VPS 网关，请求头 `Authorization: Bearer <api_token>`；处理端另带 `X-Relay-Agent: <agent_id>` 报在线）
 
 | 接口 | 作用 |
 |---|---|
-| `GET /health` | 连接状态、最新 seq、游标，以及处理端在线状态（`agent_online` / `agent_last_seen` / `last_agent`）和积压数 `pending` |
+| `GET /health` | 连接状态、最新 seq、游标，以及处理端在线状态（`agent_online` / `agent_last_seen` / `last_agent`）和 `pending`（未 ack 的真消息数，事件不计） |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息；不带 after 时从已确认游标起；limit 上限 500 |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
 | `GET /ack?seq=<seq>` | 游标推进到 seq（超过最大 seq 会钳到当前 seq） |

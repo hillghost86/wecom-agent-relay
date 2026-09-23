@@ -14,7 +14,7 @@
  *   node client/sentinel.mjs --help              帮助
  *
  * stdout 契约（供 agent / 自动化脚本解析）：
- *   NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>   发现 n 条新消息（seq 闭区间）
+ *   NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>   发现 n 条新消息（seq 闭区间；只算 kind=message，事件不唤醒）
  *   NO_MSG ...                                                --once 模式下无新消息
  *
  * 配置（优先级：环境变量 > config.json）：
@@ -82,6 +82,19 @@ async function probe() {
   return { seq: Number(h.seq) || 0, connected: !!h.connected, cursor: Number(h.cursor) || 0, agentOnline: h.agent_online ?? null, lastAgent: h.last_agent || '' };
 }
 
+/**
+ * 取 seq > after 的真消息（kind=message），enter_chat 等事件也占 seq，但不该唤醒 agent。
+ * 请求失败返回 null，由调用方按「全是真消息」处理：宁可多唤醒一轮，也不漏处理。
+ */
+async function newMessages(after) {
+  try {
+    const r = await fetch(`${BASE}/messages?after=${after}&kind=message&limit=500`, { headers: POLL_H, signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return null;
+    const m = (await r.json()).messages;
+    return Array.isArray(m) ? m : null;
+  } catch { return null; }
+}
+
 async function loop() {
   if (lastSeen === null) {
     const h = await probe();
@@ -97,16 +110,24 @@ async function loop() {
     catch (e) { console.log(`[${ts()}] ${e.message}，继续等`); await sleep(INTERVAL_S * 1000); continue; }
 
     if (h.seq > lastSeen) {
-      const n = h.seq - lastSeen;
-      fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: h.seq }));
-      console.log(`NEW_MSG count=${n} seq=${lastSeen + 1}-${h.seq} acked=${h.cursor} agent=${AGENT_ID}`);
-      if (EXEC_CMD) {
-        console.log(`[${ts()}] 执行 --exec 命令：${EXEC_CMD}`);
-        const p = spawnSync(EXEC_CMD, { shell: true, stdio: 'inherit' });
-        if (p.status !== 0) console.log(`[${ts()}] --exec 命令退出码 ${p.status}（不影响哨兵退出）`);
+      const msgs = await newMessages(lastSeen);
+      if (msgs && msgs.length === 0) {
+        console.log(`[${ts()}] seq ${lastSeen + 1}-${h.seq} 只有事件，不唤醒`);
+        lastSeen = h.seq;
+        fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: lastSeen }));
+      } else {
+        const n = msgs ? msgs.length : h.seq - lastSeen;
+        const range = msgs ? `${msgs[0].seq}-${msgs[msgs.length - 1].seq}` : `${lastSeen + 1}-${h.seq}`;
+        fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: h.seq }));
+        console.log(`NEW_MSG count=${n} seq=${range} acked=${h.cursor} agent=${AGENT_ID}`);
+        if (EXEC_CMD) {
+          console.log(`[${ts()}] 执行 --exec 命令：${EXEC_CMD}`);
+          const p = spawnSync(EXEC_CMD, { shell: true, stdio: 'inherit' });
+          if (p.status !== 0) console.log(`[${ts()}] --exec 命令退出码 ${p.status}（不影响哨兵退出）`);
+        }
+        console.log(`[${ts()}] 发现 ${n} 条新消息，退出以唤醒 agent`);
+        process.exit(0);
       }
-      console.log(`[${ts()}] 发现 ${n} 条新消息，退出以唤醒 agent`);
-      process.exit(0);
     }
     if (ONCE) { console.log(`NO_MSG server_seq=${h.seq} last_seen=${lastSeen} acked=${h.cursor} connected=${h.connected}`); process.exit(0); }
     await sleep(INTERVAL_S * 1000);

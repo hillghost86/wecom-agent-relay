@@ -66,8 +66,9 @@ node client/sentinel.mjs --once    # 期望输出 NO_MSG（或 NEW_MSG）
 1. 用后台任务方式挂起哨兵（WorkBuddy 中即 run_in_background）：
    `node client/sentinel.mjs --interval 10`
 2. 向用户说明并固化闭环约定（写入项目记忆或用户记忆）：
-   - 哨兵输出 `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` 后退出 → WorkBuddy 被唤醒 → 从通知读 seq 范围 →
-     `GET /messages/<seq>` 逐条取 → 按内容处理 → `client/poll.mjs --reply <seq> <markdown>` 回复 →
+   - 哨兵输出 `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` 后退出 → WorkBuddy 被唤醒 →
+     `GET /messages?after=<a-1>&kind=message` 一次拉取（区间内可能夹着 `enter_chat` 等事件，加 `kind=message` 自动跳过，所以 count 可能小于 b-a+1）→
+     按内容处理 → `client/poll.mjs --reply <seq> <markdown>` 回复 →
      `client/poll.mjs --ack <最大seq>` → **重挂哨兵（铁律，不重挂 = 后续消息无人发现）**
 3. 让用户在企微里 @机器人 说一句话实测：预期 ≤10 秒收到回复。
 

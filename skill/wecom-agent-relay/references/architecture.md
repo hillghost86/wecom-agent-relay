@@ -12,7 +12,8 @@ VPS 网关（server/index.mjs，systemd 常驻）
    ▼
 本机哨兵（client/sentinel.mjs，agent 的后台任务）
    │ 轮询 GET /health 只看最新 seq（10s）
-   │ seq > last_seen → 打印 NEW_MSG → 进程退出
+   │ seq > last_seen → 查 /messages?kind=message：有真消息才打印 NEW_MSG → 进程退出
+   │ （enter_chat 等事件也占 seq，只推进 last_seen、不唤醒）
    ▼
 「后台任务完成通知」自动唤醒对话式 agent
    ▼
@@ -57,7 +58,7 @@ VPS 网关提供的是 HTTP API。理论上可在本机与 VPS 之间再建一�
 
 | 输出 | 含义 |
 |---|---|
-| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），进程即将退出；`agent` 是本机处理端标识 |
+| `NEW_MSG count=<n> seq=<a>-<b> acked=<cursor> agent=<id>` | 发现 n 条新消息（seq 闭区间），进程即将退出；`agent` 是本机处理端标识；只算真消息，`enter_chat` 等事件不唤醒 |
 | `NO_MSG ...` | 仅 `--once` 模式：无新消息 |
 
 `--exec <command>` 允许在退出前执行任意命令（webhook/脚本），使哨兵能对接

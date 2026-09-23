@@ -24,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && node --check index.mjs      # 改完必做：语法检查
-node test_mock.mjs                       # 必做：起假网关跑 36 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载）
+node test_mock.mjs                       # 必做：起假网关跑 39 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载）
 node index.mjs                           # 本地跑一个真连接，读工作目录下的 config.json（注意：会踢掉 VPS 上的连接，只在用户同意时跑）
 
 # —— client/ ——（只读验证，需要 WECOM_API_BASE / WECOM_API_TOKEN 环境变量或 client/config.json）

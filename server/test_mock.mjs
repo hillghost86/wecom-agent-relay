@@ -7,7 +7,7 @@
  *   5. 服务端断开后客户端自动重连并重新订阅
  *   6. 消息落盘到 JSONL
  *   7. HTTP API：/health、/messages、/ack 游标、鉴权、/send 透传
- *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数
+ *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数、只有事件时不唤醒、pending 不计事件
  *   9. presence：X-Relay-Agent 记在线、/health 带出状态、离线时自动回复分档、管理员离线告警
  *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载
  */
@@ -191,6 +191,19 @@ try {
   await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-4'));
   const s2 = runClient('sentinel.mjs', '--once', '--exec', 'echo EXEC_RAN', '--interval', '5');
   check(/^EXEC_RAN$/m.test(s2) && !/EXEC_RAN 5/.test(s2) && /NEW_MSG count=1 seq=4-4/.test(s2), 'sentinel --exec 只取紧跟的一个参数，后续 --interval 不混入命令');
+  // 事件（enter_chat）也占 seq，但不该唤醒 agent、不算积压；先 ack 掉 seq=4，让积压只剩这条事件
+  await j('/ack?seq=4');
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_event_callback', headers: { req_id: 'REQ-EV-1' }, body: { msgid: 'ev1', chattype: 'single', from: { userid: 'u1' }, msgtype: 'event', create_time: 1, event: { eventtype: 'enter_chat' } } }));
+  await waitFor(() => fs.readFileSync(tmpLog, 'utf-8').includes('"ev1"'));
+  const s3 = runClient('sentinel.mjs', '--once');
+  const sc3 = JSON.parse(fs.readFileSync(path.join(cdir, 'sentinel_cursor.json'), 'utf-8'));
+  check(/NO_MSG/.test(s3) && !/NEW_MSG/.test(s3) && sc3.last_seen === 5, 'sentinel 新 seq 只有事件时不唤醒（NO_MSG），last_seen 推进到事件 seq', `${s3.trim().split('\n').pop()} last_seen=${sc3.last_seen}`);
+  const h4 = await j('/health');
+  check(h4.body.pending === 0 && h4.body.seq - h4.body.cursor === 1, '/health 的 pending 不计事件', `pending=${h4.body.pending} seq=${h4.body.seq} cursor=${h4.body.cursor}`);
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: 'REQ-MSG-C' }, body: { msgid: 'MSG-C', chattype: 'single', from: { userid: 'u1' }, msgtype: 'text', text: { content: 'after event' } } }));
+  await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-C'));
+  const s4 = runClient('sentinel.mjs', '--once');
+  check(/NEW_MSG count=1 seq=6-6 /.test(s4), '事件之后来真消息：NEW_MSG 只数真消息，seq 区间不含事件', s4.trim().split('\n').find((l) => l.startsWith('NEW_MSG')));
   fs.rmSync(cdir, { recursive: true, force: true });
 
   // 9. presence：处理端在线状态 + 分档自动回复 + 管理员离线告警（配置 agent_online_secs=1）
@@ -201,7 +214,9 @@ try {
     return cur().frames.find((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === `REQ-MSG-${n}`).body.stream.content;
   };
   const h3 = await j('/health');
-  check(h3.body.bot === 'default' && h3.body.last_agent === 'test-agent' && h3.body.agent_online === true && h3.body.pending === h3.body.seq - h3.body.cursor,
+  // 此时游标 4 之后是 seq5 事件 + seq6 真消息：pending 只数真消息
+  const unacked = (await j('/messages?kind=message')).body.messages.length;
+  check(h3.body.bot === 'default' && h3.body.last_agent === 'test-agent' && h3.body.agent_online === true && unacked === 1 && h3.body.pending === unacked,
     '/health 带出 bot / agent_online / last_agent / pending',
     JSON.stringify({ bot: h3.body.bot, agent_online: h3.body.agent_online, last_agent: h3.body.last_agent, pending: h3.body.pending, seq: h3.body.seq, cursor: h3.body.cursor }));
   const st2 = JSON.parse(fs.readFileSync(tmpLog + '.state.json', 'utf-8'));
