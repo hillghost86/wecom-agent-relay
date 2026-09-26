@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # —— server/ ——
 cd server && for f in src/*.mjs src/http/*.mjs test/*.mjs; do node --check "$f"; done   # 改完必做：语法检查
-npm test                                 # 必做（即 node --test test/*.test.mjs）：起假网关跑 61 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
+npm test                                 # 必做（即 node --test test/*.test.mjs）：起假网关跑 76 项断言（协议 + HTTP API + 断线自报 + client 脚本 + presence + 配置加载 + 多 bot）
 node src/index.mjs --config <路径>       # 本地跑真连接。本机不放生产配置（见下文「本机配置文件」），所以只可能连测试 bot
 
 # —— 只读检查生产（管理员 token，不带 X-Relay-Agent 头）——

@@ -24,6 +24,7 @@
  * 游标：sentinel_cursor.json 记录已见过的最大 seq（与服务端 ack 游标无关），
  *       同一批消息只触发一次退出；首次运行以服务端已确认游标起步，
  *       所以有未处理的积压会立刻触发一次唤醒。
+ *       服务端 seq 小于本地 last_seen（数据被重置或迁移）时自动以服务端游标重新起步。
  *
  * 可靠性设计：
  * - 长跑型：网络错误、无消息都不退出（退出 = 唤醒 agent = 消耗一轮对话，
@@ -109,6 +110,13 @@ async function loop() {
     try { h = await probe(); }
     catch (e) { console.log(`[${ts()}] ${e.message}，继续等`); await sleep(INTERVAL_S * 1000); continue; }
 
+    // 服务端数据被重置 / 迁移后 seq 从头数，只比 h.seq > lastSeen 会永远沉默；同一轮接着判断，有积压立刻唤醒
+    if (h.seq < lastSeen) {
+      const c = Math.min(h.cursor, h.seq);
+      console.log(`[${ts()}] 服务端 seq=${h.seq} 小于本地 last_seen=${lastSeen}（服务端数据可能被重置或迁移），以服务端游标 ${c} 重新起步`);
+      lastSeen = c;
+      fs.writeFileSync(CURSOR_FILE, JSON.stringify({ last_seen: lastSeen }));
+    }
     if (h.seq > lastSeen) {
       const msgs = await newMessages(lastSeen);
       if (msgs && msgs.length === 0) {

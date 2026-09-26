@@ -3,16 +3,19 @@
  *   1. 订阅帧带正确 bot_id/secret，并处理 errcode=0 回包
  *   2. 心跳 ping 定期到达
  *   3. 推 aibot_msg_callback 后，5 秒内收到同 req_id 的 aibot_respond_msg（finish=true）
- *   4. 重复 msgid 仍回帧但不落盘
+ *   4. 重复 msgid 仍回帧但不落盘；重复 msgid 的事件不落盘
  *   5. 服务端断开后客户端自动重连并重新订阅
  *   6. 消息落盘到 JSONL
- *   7. HTTP API：/health、/messages、/ack 游标、鉴权、/send 透传
- *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数、只有事件时不唤醒、pending 不计事件
+ *   7. HTTP API：/health、/messages、/ack 游标（seq 非法 400 且不刷新 last_ack_at）、鉴权、/send 透传
+ *   8. client/：poll.mjs --ack 不带 seq、sentinel.mjs 以游标起步与 --exec 单参数、只有事件时不唤醒、pending 不计事件、
+ *      服务端 seq 回退时哨兵重新起步、poll.mjs --reply 取消息失败报 HTTP 状态 / 没有 response_url
  *   9. presence：X-Relay-Agent 记在线、/health 带出状态、离线时自动回复分档、管理员离线告警
- *  10. 配置：config.json 校验失败退出、没有 config.json 时从环境变量兼容加载、msg_log=off 启动警告
+ *  10. 配置：config.json 校验失败退出、数值项 / key / msg_log 写错时报字段与原值且无堆栈、数值项留空用默认值、
+ *      没有 config.json 时从环境变量兼容加载、msg_log=off 启动警告
  *  12. 多 bot：另起一个两 bot 的服务端进程，验证各自连接与落盘、/bots/<key>/ 前缀路由、两级 token（401/403/404）、
  *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀、
- *      不写 msg_log 时默认落到工作目录下 bots/<key>/messages.jsonl（目录启动时自动建）、msg_log 为空串等同于没写
+ *      不写 msg_log 时默认落到工作目录下 bots/<key>/messages.jsonl（目录启动时自动建）、msg_log 为空串等同于没写、
+ *      poll.mjs --ack <seq> 打印实际游标、reply_text_offline 留空时离线也回 reply_text
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -20,6 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { normalizeConfig } from '../src/config.mjs';
 
 const BOT_ID = 'aibTEST', SECRET = 'sec-TEST';
 const BOT2_ID = 'aibTEST2', SECRET2 = 'sec-TEST2';   // 第 12 节多 bot 的第二个机器人
@@ -67,7 +71,7 @@ const cfgFile = path.join(cfgDir, 'config.json');
 fs.writeFileSync(cfgFile, JSON.stringify({
   http: { host: '127.0.0.1', port: httpPort, api_token: API_TOKEN },
   ws_url: `ws://127.0.0.1:${port}`,
-  ping_interval_ms: 300,
+  ping_interval_ms: 1000,        // 配置允许的下限
   outage_min_secs: 0,
   outage_report_min_ms: 0,
   agent_online_secs: 1,          // 1 秒没露面就算处理端离线，便于测分档回复
@@ -96,7 +100,7 @@ try {
     '启动后按 .alive 文件自报「进程重启」空窗', rep1.body.markdown.content.split('\n')[0]);
 
   // 2. 心跳
-  await waitFor(() => conns[0].frames.filter((f) => f.cmd === 'ping').length >= 2, 3000);
+  await waitFor(() => conns[0].frames.filter((f) => f.cmd === 'ping').length >= 2, 4000);
   check(true, '心跳 ping 定期到达', `${conns[0].frames.filter((f) => f.cmd === 'ping').length} 次`);
 
   // 3. 推消息，期待回复
@@ -169,6 +173,13 @@ try {
   check(badAfter.status === 400 && badLimit.status === 400, 'GET /messages 的 after/limit 非数字返回 400');
   const clamp = await j('/ack?seq=999999');
   check(clamp.body.cursor === 2, 'GET /ack 超过最大 seq 时钳到当前 seq', `cursor=${clamp.body.cursor}`);
+  // 缺参曾被当成 0、小数负数也被接受，且照样刷新 last_ack_at，让处理端被误判在线
+  const ackAtBefore = (await j('/health')).body.last_ack_at;
+  await sleep(20);
+  const badAcks = [await j('/ack'), await j('/ack?seq=1.5'), await j('/ack?seq=-1')];
+  const ackAtAfter = (await j('/health')).body.last_ack_at;
+  check(badAcks.every((x) => x.status === 400 && x.body.error === 'seq must be a non-negative integer') && ackAtBefore && ackAtAfter === ackAtBefore,
+    '/ack 不带 seq、seq=1.5、seq=-1 均 400，且不刷新 last_ack_at', `${badAcks.map((x) => x.status).join(',')} ${ackAtBefore} → ${ackAtAfter}`);
 
   const sendBody = { chatid: 'CHAT1', chat_type: 1, msgtype: 'markdown', markdown: { content: '**主动推送**' } };
   const sd = await j('/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sendBody) });
@@ -182,10 +193,19 @@ try {
   const { execFileSync } = await import('node:child_process');
   const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-client-'));
   for (const f of ['poll.mjs', 'sentinel.mjs']) fs.copyFileSync(new URL(`../../client/${f}`, import.meta.url), path.join(cdir, f));
-  const runClient = (script, ...a) => {
-    try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: API_TOKEN, WECOM_AGENT_ID: 'test-agent' }, encoding: 'utf-8', timeout: 10000 }); }
+  const runClientAs = (token, script, ...a) => {
+    try { return execFileSync(process.execPath, [path.join(cdir, script), ...a], { env: { ...process.env, WECOM_API_BASE: base, WECOM_API_TOKEN: token, WECOM_AGENT_ID: 'test-agent' }, encoding: 'utf-8', timeout: 10000 }); }
     catch (e) { return (e.stdout || '') + (e.stderr || '') + `\n[exit ${e.status}]`; }
   };
+  const runClient = (script, ...a) => runClientAs(API_TOKEN, script, ...a);
+  // 服务端数据被重置 / 迁移后 seq 小于本地 last_seen：以服务端游标重新起步。此时 seq=cursor=2，没有积压
+  const cursorFile = path.join(cdir, 'sentinel_cursor.json');
+  fs.writeFileSync(cursorFile, JSON.stringify({ last_seen: 999 }));
+  const r0 = runClient('sentinel.mjs', '--once');
+  const rc0 = JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
+  check(/重新起步/.test(r0) && /NO_MSG/.test(r0) && !/NEW_MSG/.test(r0) && rc0.last_seen === 2, 'sentinel 服务端 seq 小于本地 last_seen 时以服务端游标重新起步，无积压 NO_MSG',
+    `${r0.trim().split('\n').find((l) => /重新起步/.test(l))} last_seen=${rc0.last_seen}`);
+  fs.unlinkSync(cursorFile); // 下面要测首次运行
   // 服务端此时 cursor=2、seq=2；再推一条形成积压（seq=3 > cursor）
   conns[1].ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: 'REQ-MSG-3' }, body: { msgid: 'MSG3', chattype: 'single', from: { userid: 'u3' }, msgtype: 'text', text: { content: 'backlog' } } }));
   await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-3'));
@@ -200,8 +220,14 @@ try {
   check(/^EXEC_RAN$/m.test(s2) && !/EXEC_RAN 5/.test(s2) && /NEW_MSG count=1 seq=4-4/.test(s2), 'sentinel --exec 只取紧跟的一个参数，后续 --interval 不混入命令');
   // 事件（enter_chat）也占 seq，但不该唤醒 agent、不算积压；先 ack 掉 seq=4，让积压只剩这条事件
   await j('/ack?seq=4');
-  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_event_callback', headers: { req_id: 'REQ-EV-1' }, body: { msgid: 'ev1', chattype: 'single', from: { userid: 'u1' }, msgtype: 'event', create_time: 1, event: { eventtype: 'enter_chat' } } }));
+  const evBody = { msgid: 'ev1', chattype: 'single', from: { userid: 'u1' }, msgtype: 'event', create_time: 1, event: { eventtype: 'enter_chat' } };
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_event_callback', headers: { req_id: 'REQ-EV-1' }, body: evBody }));
   await waitFor(() => fs.readFileSync(tmpLog, 'utf-8').includes('"ev1"'));
+  // 企微会用相同 msgid 重推事件（线上实测相隔 86ms 推了两次），第二次不该再占一个 seq
+  conns[1].ws.send(JSON.stringify({ cmd: 'aibot_event_callback', headers: { req_id: 'REQ-EV-1-DUP' }, body: evBody }));
+  await waitFor(() => childOut.includes('重复事件')).catch(() => {});
+  const evLines = fs.readFileSync(tmpLog, 'utf-8').split('\n').filter((l) => l.includes('"msgid":"ev1"')).length;
+  check(evLines === 1 && /重复事件，不落盘 ev1/.test(childOut), '同一 msgid 的事件推两次只落盘一条，日志记「重复事件」', `落盘 ${evLines} 条`);
   const s3 = runClient('sentinel.mjs', '--once');
   const sc3 = JSON.parse(fs.readFileSync(path.join(cdir, 'sentinel_cursor.json'), 'utf-8'));
   check(/NO_MSG/.test(s3) && !/NEW_MSG/.test(s3) && sc3.last_seen === 5, 'sentinel 新 seq 只有事件时不唤醒（NO_MSG），last_seen 推进到事件 seq', `${s3.trim().split('\n').pop()} last_seen=${sc3.last_seen}`);
@@ -211,6 +237,15 @@ try {
   await waitFor(() => conns[1].frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-C'));
   const s4 = runClient('sentinel.mjs', '--once');
   check(/NEW_MSG count=1 seq=6-6 /.test(s4), '事件之后来真消息：NEW_MSG 只数真消息，seq 区间不含事件', s4.trim().split('\n').find((l) => l.startsWith('NEW_MSG')));
+  // 重新起步后同一轮就判断积压：此时 cursor=4、seq=6，seq 6 是未 ack 的真消息
+  fs.writeFileSync(cursorFile, JSON.stringify({ last_seen: 999 }));
+  const s5 = runClient('sentinel.mjs', '--once');
+  check(/重新起步/.test(s5) && /NEW_MSG count=1 seq=6-6 /.test(s5), 'sentinel 重新起步后同一轮发现积压，立刻 NEW_MSG', s5.trim().split('\n').find((l) => l.startsWith('NEW_MSG')));
+  // 用 seq=2（没有 response_url）测：万一取消息判断出错也不会真的 POST 到企微
+  const pr1 = runClientAs('wrong-token', 'poll.mjs', '--reply', '2', 'x');
+  check(/取消息失败 HTTP 401/.test(pr1) && /\[exit [1-9]\d*\]/.test(pr1) && !/response_url/.test(pr1), 'poll.mjs --reply 取消息 401 时报 HTTP 状态并非 0 退出，不误报没有 response_url', pr1.trim().split('\n')[0]);
+  const pr2 = runClient('poll.mjs', '--reply', '2', 'x');
+  check(/seq=2 没有 response_url/.test(pr2) && !/已过期|已消费/.test(pr2) && /\[exit [1-9]\d*\]/.test(pr2), 'poll.mjs --reply 消息本身没有 response_url 时如实提示', pr2.trim().split('\n')[0]);
   fs.rmSync(cdir, { recursive: true, force: true });
 
   // 9. presence：处理端在线状态 + 分档自动回复 + 管理员离线告警（配置 agent_online_secs=1）
@@ -261,6 +296,39 @@ try {
   fs.writeFileSync(badCfg, JSON.stringify({ http: { port: 0 }, bots: [] }));
   const badRun = spawnSync(process.execPath, ['src/index.mjs', '--config', badCfg], { cwd: serverDir, encoding: 'utf-8', timeout: 5000 });
   check(badRun.status !== 0 && /bots/.test(badRun.stderr || ''), '配置非法（bots 为空）时非 0 退出并打印原因', `exit=${badRun.status} ${(badRun.stderr || '').trim().split('\n')[0]}`);
+  // 数值写错曾静默变成 NaN（ping_interval_ms="30s" 让心跳每 1ms 一次）；key 写成数字曾在拼路径时抛 TypeError 打出堆栈
+  const okBot = { bot_id: 'x', secret: 'y', msg_log: 'off' };
+  const cfgCases = [
+    ['ping_interval_ms 写成 "30s"', { ping_interval_ms: '30s' }, /ping_interval_ms 必须是不小于 1000 的数字（收到 "30s"）/],
+    ['http.port 写成 "abc"', { http: { port: 'abc' } }, /http\.port 必须是 0–65535 的整数（收到 "abc"）/],
+    ['key 写成数字', { bots: [{ key: 2, bot_id: 'x', secret: 'y' }] }, /key 必须是字符串/],
+    ['msg_log 写成数字', { bots: [{ bot_id: 'x', secret: 'y', msg_log: 5 }] }, /msg_log 必须是字符串路径或 "off"/],
+    ['其余数值项越界', { agent_online_secs: 0, outage_min_secs: -1, outage_report_min_ms: 'x', bots: [{ ...okBot, offline_alert_mins: 'abc' }] },
+      /agent_online_secs 必须是大于 0 的数字（收到 0）[\s\S]*outage_min_secs 必须是不小于 0 的数字（收到 -1）[\s\S]*outage_report_min_ms 必须是不小于 0 的数字（收到 "x"）[\s\S]*bots\[0\]（default）: offline_alert_mins 必须是不小于 0 的数字（收到 "abc"）/],
+  ];
+  for (const [label, over, re] of cfgCases) {
+    fs.writeFileSync(badCfg, JSON.stringify({ http: { port: 0 }, bots: [okBot], ...over }));
+    const r = spawnSync(process.execPath, ['src/index.mjs', '--config', badCfg], { cwd: serverDir, encoding: 'utf-8', timeout: 5000 });
+    const err = r.stderr || '';
+    check(r.status !== 0 && re.test(err) && !/TypeError|^\s+at /m.test(err), `配置校验：${label}，报字段与原值后非 0 退出，无堆栈`, `exit=${r.status} ${err.trim().split('\n').slice(1).join(' ')}`);
+  }
+  // 数值项留空按没写处理：Number("") 是 0，"port": "" 曾让 HTTP 静默不起。纯函数验证，不去占真的 8788
+  const { gw: blankGw, bots: [blankBot] } = normalizeConfig({ http: { port: '' }, agent_online_secs: ' ', ping_interval_ms: '', outage_min_secs: '', outage_report_min_ms: '', bots: [{ ...okBot, offline_alert_mins: '' }] }, 'test');
+  check(blankGw.httpPort === 8788 && blankGw.agentOnlineSecs === 300 && blankGw.pingIntervalMs === 30000 && blankGw.outageMinSecs === 3 && blankGw.outageReportMinMs === 60000 && blankBot.offlineAlertMins === 0,
+    '数值项留空（空串 / 纯空白）等同于没写，取默认值（port 为 8788 而不是 0）', JSON.stringify({ port: blankGw.httpPort, online: blankGw.agentOnlineSecs, ping: blankGw.pingIntervalMs }));
+  // 再起一次进程：留空的配置能正常启动；ws 路径用 /blank，不和别的进程的连接记录混在一起
+  const blankPort = await new Promise((r) => { const srv = net.createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => r(p)); }); });
+  fs.writeFileSync(badCfg, JSON.stringify({ http: { port: blankPort }, ws_url: `ws://127.0.0.1:${port}/blank`, agent_online_secs: '', ping_interval_ms: '', bots: [{ bot_id: BOT_ID, secret: SECRET, msg_log: 'off' }] }));
+  const blankChild = spawn(process.execPath, ['src/index.mjs', '--config', badCfg], { cwd: serverDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  let blankOut = '';
+  blankChild.stdout.on('data', (d) => { blankOut += d; });
+  blankChild.stderr.on('data', (d) => { blankOut += d; });
+  const blankUp = await waitFor(() => /订阅成功/.test(blankOut) && /HTTP API 监听/.test(blankOut), 8000).then(() => true, () => false);
+  const blankExit = new Promise((r) => blankChild.once('exit', r));
+  blankChild.kill('SIGTERM');
+  await blankExit;
+  check(blankUp && new RegExp(`HTTP API 监听 http://127\\.0\\.0\\.1:${blankPort}`).test(blankOut), 'agent_online_secs / ping_interval_ms 留空的配置正常启动（订阅成功、HTTP 起来）',
+    blankOut.split('\n').find((l) => /HTTP API 监听|配置有误/.test(l)));
 
   // 11. 兼容期：没有 config.json 时从环境变量加载（ws_url 也走环境变量，否则只能连真实网关）
   const envDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-env-'));
@@ -289,9 +357,10 @@ try {
   const mLogDefault = path.join(multiDir, 'bots', 'default', 'messages.jsonl'), mLogTest = path.join(multiDir, 'bots', 'test', 'messages.jsonl');
   const mBots = [
     { key: 'default', bot_id: BOT_ID, secret: SECRET, msg_log: '' },
-    { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN },
+    { key: 'test', bot_id: BOT2_ID, secret: SECRET2, api_token: TEST_TOKEN, reply_text_offline: '' },   // 留空：离线时应退回 reply_text
   ];
-  const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, bots: mBots, ...over });
+  // agent_online_secs=1：末尾要测处理端离线时的回帧
+  const mCfg = (over = {}) => ({ http: { host: '127.0.0.1', port: mPort, api_token: ADMIN_TOKEN }, ws_url: `ws://127.0.0.1:${port}/multi`, agent_online_secs: 1, bots: mBots, ...over });
   const mCfgFile = path.join(multiDir, 'config.json');
   fs.writeFileSync(mCfgFile, JSON.stringify(mCfg(), null, 2));
   multiChild = spawn(process.execPath, [path.join(serverDir, 'src', 'index.mjs'), '--config', mCfgFile], { cwd: multiDir, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -363,6 +432,14 @@ try {
   const cAll = (await mj('/bots', ADMIN_TOKEN)).body.bots;
   check(/已 ack 到 seq=2/.test(mp1) && cAll[1].cursor === 2 && cAll[0].cursor === 0 && cAll[0].seq === 1, 'client 零改动：poll.mjs --ack 只推进 test 的游标，default 游标不变',
     `test cursor=${cAll[1].cursor} default cursor=${cAll[0].cursor} seq=${cAll[0].seq}`);
+  const ma = mRun('poll.mjs', '--ack', '99999');
+  check(/游标已推进到 2（请求 99999，已钳到当前最大 seq）/.test(ma), 'poll.mjs --ack <seq> 打印服务端实际游标，被钳住时注明', ma.trim());
+  // 处理端离线且 reply_text_offline 留空：曾返回空串导致 5 秒内不回帧
+  await sleep(1300);
+  const tOff = (await mj('/bots/test/health', TEST_TOKEN)).body.agent_online;
+  await mPush(BOT2_ID, 'MSG-T3');
+  const offEmpty = mConn(BOT2_ID).frames.find((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === 'REQ-MSG-T3')?.body.stream.content;
+  check(tOff === false && offEmpty === '已收到', '处理端离线且 reply_text_offline 为空串时回帧退回 reply_text', `agent_online=${tOff} content=${offEmpty}`);
 
   // 多 bot 配置校验：都在加载配置时退出，不会连网关
   const badCases = [

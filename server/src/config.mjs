@@ -78,16 +78,23 @@ export function normalizeConfig(raw, source) {
   if (!raw || typeof raw !== 'object') errs.push('配置内容必须是一个 JSON 对象');
   const r = raw && typeof raw === 'object' ? raw : {};
   const h = r.http && typeof r.http === 'object' ? r.http : {};
+  // 数字字符串也接受；NaN / Infinity / 越界要拦下：如 ping_interval_ms 写成 "30s" 会变成 NaN，心跳每 1ms 触发一次
+  // 空串 / 纯空白按没写处理：Number("") 是 0，"port": "" 会静默不起 HTTP（和 msg_log 留空是同一类坑）
+  const num = (v, dft, name, ok, want) => {
+    const n = Number(v == null || (typeof v === 'string' && v.trim() === '') ? dft : v);
+    if (!Number.isFinite(n) || !ok(n)) errs.push(`${name} 必须是${want}（收到 ${typeof v === 'number' ? v : JSON.stringify(v)}）`);
+    return n;
+  };
   const gw = {
     httpHost: h.host ?? '127.0.0.1',
-    httpPort: Number(h.port ?? 8788),
+    httpPort: num(h.port, 8788, 'http.port', (n) => Number.isInteger(n) && n >= 0 && n <= 65535, ' 0–65535 的整数'),
     apiToken: h.api_token ?? '',
     tz: r.tz ?? 'Asia/Shanghai',
-    agentOnlineSecs: Number(r.agent_online_secs ?? 300),
+    agentOnlineSecs: num(r.agent_online_secs, 300, 'agent_online_secs', (n) => n > 0, '大于 0 的数字'),
     wsUrl: r.ws_url ?? 'wss://openws.work.weixin.qq.com',
-    pingIntervalMs: Number(r.ping_interval_ms ?? 30000),
-    outageMinSecs: Number(r.outage_min_secs ?? 3),            // 低于这个秒数不报
-    outageReportMinMs: Number(r.outage_report_min_ms ?? 60000), // 抖动时最多每分钟报一次
+    pingIntervalMs: num(r.ping_interval_ms, 30000, 'ping_interval_ms', (n) => n >= 1000, '不小于 1000 的数字'),
+    outageMinSecs: num(r.outage_min_secs, 3, 'outage_min_secs', (n) => n >= 0, '不小于 0 的数字'),                // 低于这个秒数不报
+    outageReportMinMs: num(r.outage_report_min_ms, 60000, 'outage_report_min_ms', (n) => n >= 0, '不小于 0 的数字'), // 抖动时最多每分钟报一次
     subscribeTimeoutMs: 10000,
     backoffMinMs: 1000,
     backoffMaxMs: 60000,
@@ -100,15 +107,19 @@ export function normalizeConfig(raw, source) {
     const b = b0 && typeof b0 === 'object' ? b0 : {};
     const key = b.key ?? (list.length === 1 ? 'default' : '');
     const at = `bots[${i}]${key ? `（${key}）` : ''}`;
-    if (!key) errs.push(`${at}: 配了多个机器人时每个都必须有 key`);
-    else if (!/^[a-z0-9_-]+$/.test(key)) errs.push(`${at}: key 只允许小写字母、数字、下划线和减号`);
+    // key 写成数字能过正则（test 会转字符串），随后拼路径时 path.join 抛 TypeError，所以先查类型
+    const keyOk = typeof key === 'string' && /^[a-z0-9_-]+$/.test(key);
+    if (typeof key !== 'string') errs.push(`${at}: key 必须是字符串`);
+    else if (!key) errs.push(`${at}: 配了多个机器人时每个都必须有 key`);
+    else if (!keyOk) errs.push(`${at}: key 只允许小写字母、数字、下划线和减号`);
     else if (seenKeys.has(key)) errs.push(`${at}: key 重复`);
     seenKeys.add(key);
     if (!b.bot_id) errs.push(`${at}: 缺少 bot_id`);
     if (!b.secret) errs.push(`${at}: 缺少 secret`);
+    if (b.msg_log != null && typeof b.msg_log !== 'string') errs.push(`${at}: msg_log 必须是字符串路径或 "off"`);
     // 默认数据文件：每个 bot 一个目录 bots/<key>/，以后媒体下载的 files/ 也放在这个目录下
-    // 空串 / 纯空白按没写处理：曾被当成 off，网关静默只放内存，重启后数据全无
-    const msgLog = b.msg_log == null || String(b.msg_log).trim() === '' ? path.join(process.cwd(), 'bots', key, 'messages.jsonl') : b.msg_log;
+    // 空串 / 纯空白按没写处理：曾被当成 off，网关静默只放内存，重启后数据全无；key 不合法时不拼（反正要报错退出）
+    const msgLog = typeof b.msg_log === 'string' && b.msg_log.trim() !== '' ? b.msg_log : keyOk ? path.join(process.cwd(), 'bots', key, 'messages.jsonl') : '';
     return {
       key,
       botId: b.bot_id || '',
@@ -116,7 +127,7 @@ export function normalizeConfig(raw, source) {
       replyText: b.reply_text ?? '已收到',
       replyTextOffline: b.reply_text_offline ?? DEFAULT_REPLY_OFFLINE,
       adminUserId: b.admin_userid ?? '',
-      offlineAlertMins: Number(b.offline_alert_mins ?? 0),
+      offlineAlertMins: num(b.offline_alert_mins, 0, `${at}: offline_alert_mins`, (n) => n >= 0, '不小于 0 的数字'),
       msgLog,
       apiToken: b.api_token ?? '',
       tag: list.length > 1 ? `[${key}]` : '',

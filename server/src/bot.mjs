@@ -12,7 +12,7 @@ export class Bot {
     Object.assign(this, logger);   // this.log / this.warn，BotConnection 和告警也用它
     this.store = new MessageStore(conf.msgLog, logger);
     // 最后在线时刻：每次心跳写一次，重启后用来算空窗
-    this.aliveFile = conf.msgLog && conf.msgLog !== 'off' ? conf.msgLog + '.alive' : null;
+    this.aliveFile = this.store.file ? this.store.file + '.alive' : null;
     this.seenMsgIds = new Set();
     this.conn = null;
     // 处理端（agent）在线状态：毫秒时间戳，0 = 没见过

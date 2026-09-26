@@ -45,10 +45,11 @@ export function getMessage(bot, seq) {
 
 /** GET|POST /ack?seq= */
 export function ack(bot, searchParams) {
-  const seq = Number(searchParams.get('seq'));
-  if (!Number.isFinite(seq)) return [400, { ok: false, error: 'seq required' }];
+  // 缺参时 Number(null) 是 0，小数、负数也能过 isFinite；非法请求不能刷新 lastAckAt，否则处理端被误判在线
+  const raw = searchParams.get('seq');
+  if (!/^\d+$/.test(raw ?? '')) return [400, { ok: false, error: 'seq must be a non-negative integer' }];
   bot.presence.lastAckAt = Date.now();
-  const cursor = bot.store.ack(seq);
+  const cursor = bot.store.ack(Number(raw));
   bot.saveState();
   return [200, { ok: true, cursor }];
 }

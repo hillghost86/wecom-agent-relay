@@ -25,6 +25,7 @@ node client/sentinel.mjs --exec "<命令>"      # 发现新消息时先执行命
 行为要点：
 
 - 本地游标存在同目录 `sentinel_cursor.json`（`last_seen`）。首次运行以服务端**已确认游标**起步，有未 ack 的积压会立刻唤醒一次。
+- 服务端 seq 小于本地 `last_seen`（服务端数据被重置或迁移）时，打一行「重新起步」日志，自动以服务端游标重新起步，同一轮就判断积压。
 - seq 涨了之后，用一次 `/messages?after=<last_seen>&kind=message` 查真消息。全是事件（如 `enter_chat`）就推进 `last_seen`、继续睡，不唤醒。这次查询失败时按全是真消息处理，宁可多唤醒一次。
 - 网关连不上时打一行日志继续等，不退出。
 - 长跑循环带 `X-Relay-Agent`，让网关知道处理端在线；`--once` / `--status` 不带。

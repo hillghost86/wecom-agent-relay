@@ -77,6 +77,7 @@ VPS 网关（`server/src/index.mjs`，接口实现在 `server/src/http/`）在 `
 
 把游标推进到 seq（也接受 POST）。返回 `{ "ok": true, "cursor": <推进后的游标> }`。
 
+- `seq` 必须是非负整数：不带、小数、负数都返回 `400 {"ok":false,"error":"seq must be a non-negative integer"}`，这时不刷新 `last_ack_at`。
 - 游标只前进不后退：传比当前小的值不生效。
 - **超过当前最大 seq 会钳到最大 seq**，防止误传大数把之后的消息全跳过。
 - 调用会把 `last_ack_at` 更新为现在，算处理端「在干活」。

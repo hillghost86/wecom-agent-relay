@@ -28,7 +28,8 @@
 2. 确认 agent 框架开启了「后台任务完成通知」（WorkBuddy 默认开启）
 3. 手动 `node client/sentinel.mjs --status` 看本地 last_seen 与服务端 seq：
    若 last_seen ≥ 服务端 seq，说明没有新消息（哨兵无错，等消息即可）；
-   seq 涨了但没唤醒，可能新来的只是 `enter_chat` 等事件（用户点开聊天窗就会推），哨兵按设计不唤醒
+   seq 涨了但没唤醒，可能新来的只是 `enter_chat` 等事件（用户点开聊天窗就会推），哨兵按设计不唤醒；
+   last_seen 大于服务端 seq 多半是服务端数据被重置或迁移，哨兵下一轮会自动以服务端游标重新同步，日志里有「重新起步」
 4. 若 last_seen 被误推进（比如有人跑过 `--once`/`--status` 之外又手动改了游标），
    可删 `client/sentinel_cursor.json` 重挂哨兵（会以服务端已确认游标重新起步，有未 ack 的积压会立刻唤醒一次）
 

@@ -213,6 +213,11 @@ export class BotConnection {
       case 'aibot_msg_callback':
         return this.onMsgCallback(frame);
       case 'aibot_event_callback':
+        // 企微会用相同 msgid 重推事件（实测同一个 enter_chat 相隔 86ms 推两次）；加前缀和消息的 msgid 分开
+        if (frame.body?.msgid && this.bot.isDuplicate('event:' + frame.body.msgid)) {
+          this.bot.log('重复事件，不落盘', frame.body.msgid);
+          return;
+        }
         this.bot.log('【事件】', JSON.stringify(maskBody(frame.body)));
         this.bot.store.append({ kind: 'event', req_id: reqId, body: frame.body });
         return;
@@ -226,7 +231,9 @@ export class BotConnection {
     const { replyText, replyTextOffline } = this.conf;
     if (!replyText) return '';                       // 配成空串就是不回帧
     if (this.bot.agentOnline() === false) {
-      return String(replyTextOffline || '').replace(/\{duration\}/g, fmtDuration(this.bot.offlineSecs()));
+      // 离线文案留空不能变成不回帧（5 秒内必须回一帧），退回 reply_text
+      if (!String(replyTextOffline || '').trim()) return replyText;
+      return String(replyTextOffline).replace(/\{duration\}/g, fmtDuration(this.bot.offlineSecs()));
     }
     return replyText;
   }

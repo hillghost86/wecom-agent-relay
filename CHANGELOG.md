@@ -13,6 +13,14 @@
 - **默认消息文件位置改为 `bots/<key>/messages.jsonl`**（单 bot 即 `bots/default/messages.jsonl`，`.state.json` / `.alive` 跟着进同一目录，目录启动时自动建；同目录下的 `files/` 预留给以后的媒体下载）。**不兼容旧位置，升级前必须按 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级数据文件搬进-botskey) 手工搬移，否则网关会从 seq 0 重新开始。** 显式写了 `msg_log` 的配置不受影响。
 
 ### 修复
+- 数值配置项写错不再静默变成 NaN（例如 `ping_interval_ms: "30s"` 曾让心跳每 1ms 触发一次）：`http.port`（0–65535 整数）、`agent_online_secs`（> 0）、`ping_interval_ms`（≥ 1000）、`outage_min_secs` / `outage_report_min_ms` / `bots[].offline_alert_mins`（≥ 0）越界或不是数字时启动报错退出，写明字段和收到的原值。数字字符串仍接受；留空（空串或只有空白）等同于没写，用默认值（`"port": ""` 以前是 0，HTTP API 会静默不启动）。
+- `bots[].key` 写成数字曾在拼默认路径时抛 `TypeError` 打出堆栈；现在和其他配置错误一样报「key 必须是字符串」后退出。`msg_log` 不是字符串时同样报错。
+- 哨兵：服务端 seq 小于本地 `last_seen`（服务端数据被重置或迁移）时曾永远沉默；现在打一行「重新起步」日志，以服务端游标重新起步，同一轮就判断积压。
+- `/ack` 的 `seq` 缺失、小数或负数时曾被接受（缺参当成 0）并刷新 `last_ack_at`，让处理端被误判在线；现在返回 `400 seq must be a non-negative integer`，不刷新、不写盘。
+- 企微用相同 `msgid` 重推的事件（实测同一个 `enter_chat` 推两次）曾各占一个 seq；现在按 `msgid` 去重，只落盘一条。
+- 处理端离线且 `reply_text_offline` 配成空串时曾不回帧；现在退回 `reply_text`。
+- `poll.mjs --reply`：取消息返回 401 / 502 等时曾误报「找不到 response_url（可能已过期或已消费）」；现在打印 `取消息失败 HTTP <状态码>` 并以 1 退出。消息本身没有 `response_url` 时提示 `seq=<seq> 没有 response_url`。
+- `poll.mjs --ack <seq>` 打印服务端实际游标，被钳到当前最大 seq 时注明，不再原样回显命令行参数。
 - `msg_log` 写成空字符串（`"msg_log": ""`）时，网关把它当成 `"off"`，消息只放内存、不打任何提示，重启后数据全无。现在空字符串或只有空白等同于没写，走默认路径 `bots/<key>/messages.jsonl`；环境变量 `MSG_LOG=""` 同样生效。`"off"` 行为不变，但启动时会打一条警告（多 bot 时带 `[<key>]` 前缀）。
 
 ### 新增
@@ -27,7 +35,7 @@
 - `docs/config.md` 加 `bots[].api_token`、两级 token 与多机器人配置示例；`docs/api.md` 加「多 bot 路由」与 `GET /bots`；`docs/deploy.md` 加「加一个机器人」；`docs/presence.md`、`docs/roadmap.md`、`docs/agent-integration.md`、`server/README.md`、根 README 同步。`server/config.example.json` 的 `bots[0]` 加空的 `api_token`（留空即只用管理员 token）。
 
 ### 测试
-- `test_mock.mjs` 从 39 项扩到 61 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀；另加 `msg_log` 空字符串走默认路径、`"off"` 启动警告两项。
+- `test_mock.mjs` 从 39 项扩到 61 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀；另加 `msg_log` 空字符串走默认路径、`"off"` 启动警告两项。之后扩到 76 项，覆盖上面「修复」各条；为满足 `ping_interval_ms` ≥ 1000，自测里的心跳间隔从 300ms 改为 1000ms。
 
 ## v0.2.1 — 2026-09-24
 

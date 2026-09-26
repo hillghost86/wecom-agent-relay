@@ -86,7 +86,9 @@ const ackIdx = args.indexOf('--ack');
 if (ackIdx >= 0 && /^\d+$/.test(args[ackIdx + 1] ?? '')) {
   const seq = args[ackIdx + 1];
   const r = await api(`/ack?seq=${seq}`);
-  console.log(r.status === 200 ? `游标已推进到 ${seq}` : `失败 ${r.status}: ${JSON.stringify(r.body)}`);
+  // 服务端会把超过最大 seq 的请求钳住，打印实际游标，别让人以为推进到了请求值
+  const c = r.body?.cursor;
+  console.log(r.status === 200 ? `游标已推进到 ${c}${c < Number(seq) ? `（请求 ${seq}，已钳到当前最大 seq）` : ''}` : `失败 ${r.status}: ${JSON.stringify(r.body)}`);
   process.exit(r.status === 200 ? 0 : 1);
 }
 
@@ -97,10 +99,16 @@ if (args.includes('--reply')) {
   // 单条取该消息拿 response_url（比拉一段再过滤干净）
   const r0 = await api(`/messages/${seq}`);
   if (r0.status === 404) { console.error(`seq=${seq} 不存在`); process.exit(1); }
+  // 401 / 502 等失败体不是消息，不能当成「没有 response_url」
+  if (r0.status !== 200) {
+    console.error(`取消息失败 HTTP ${r0.status}: ${(typeof r0.body === 'string' ? r0.body : JSON.stringify(r0.body)).slice(0, 300)}`);
+    process.exit(1);
+  }
   const msg = r0.body?.message || r0.body;
   const replyUrl = msg?.body?.response_url || msg?.response_url;
+  // 网关不删存下的 URL；过期要等 POST 时企微返回 errcode 才知道，这里只可能是消息本身没带
   if (!replyUrl) {
-    console.error(`找不到 seq=${seq} 的 response_url（可能已过期或已消费）`);
+    console.error(`seq=${seq} 没有 response_url`);
     process.exit(1);
   }
   const res = await fetch(replyUrl, {
