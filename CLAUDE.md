@@ -37,7 +37,7 @@ node client/poll.mjs --health            # 测试 bot 状态：subscribed:true �
 node client/sentinel.mjs --status        # 本地/服务端 seq 对照
 
 # —— 部署（由用户在 VPS 上执行，我没有 VPS 的 SSH）——
-scp -r server/package.json server/src <vps>:<部署目录>/   # 部署目录见本机记忆；上传后确认文件属主和运行用户一致
+sudo -u www git -C <仓库目录> pull                        # 用户在 VPS 上执行；仓库目录见本机记忆（git 部署，2026-09-26 起）
 # 用户的 VPS 用宝塔「Node 项目」管理进程（npm start，读部署目录下的 config.json），不是 systemd：
 # 重启和看日志都在宝塔面板里做，不要给 systemctl / journalctl 命令
 ```
@@ -71,7 +71,7 @@ scp -r server/package.json server/src <vps>:<部署目录>/   # 部署目录见�
 3. **改完 `server/src/` 下任何文件必跑** `node --check` 和 `npm test`，新行为必须在 `server/test/mock.test.mjs` 里有断言；改完 `client/*.mjs` 同样跑 server 的 `npm test`（含 client 断言），再对真网关做一次只读验证。**生产 bot 的只读验证用不带 `X-Relay-Agent` 头的 curl**（token 取自 `admin.json`，见「常用命令」），不要拿 `poll.mjs` 对生产：它带头会把这台机器记成处理端在线，污染线上 presence。本机 `client/` 指向测试 bot，`poll.mjs` 和哨兵对它随便跑。跑不了要明说。
 4. **不主动对企微发消息**：`/send`、`response_url`、`--reply` 这些会让企微里真的出现一条消息，只给用户命令让用户跑，或用户明确让我发时才发。只读接口（`/health` `/messages`）可以随时调。
    **例外：测试 bot**（2026-09-24 用户授权）。对 key 为 `test` 的机器人，我可以自行调 `/send`、`--reply`、`--ack`、带 `X-Relay-Agent` 的请求，测试 bot 目前配在 VPS 的 `bots` 里（key `test`），本机 `client/config.json` 用它自己的 token 访问 `…/bots/test`。要在本机跑服务端连它做真实联调时，先让用户从 VPS 配置里删掉 `test` 并重启：同一个 bot 两处同时连会互相踢、反复重连。生产 bot 仍按本条执行。
-5. **部署由用户执行**：我没有 VPS 的 SSH。改完给出 `scp` 命令，并请用户在宝塔面板里重启 Node 项目，提醒重启会丢那几秒的消息。
+5. **部署由用户执行**：我没有 VPS 的 SSH。代码先推到 GitHub，再请用户在 VPS 上 `git pull`（或切到指定分支 / tag），然后在宝塔面板里重启 Node 项目，提醒重启会丢那几秒的消息。
 6. **不覆盖用户未提交的改动**：`git status` / `git diff` 先看；禁止 `git checkout -- <路径>`、`git restore`、`git reset --hard`、`git clean -f`、未经同意的 `git stash`。要看历史版本用 `git show <ref>:<path>`。
 7. **移动 / 改名 / 删除文件后全仓更新引用**：`grep -r '旧文件名'`，README、注释、systemd 单元、`.gitignore` 里的路径逐处改，零残留再收工。
 8. **简单优先，每行改动可追溯**：只写解决问题的最少代码，每一行都能答上「对应用户的哪句话」；顺手看到的无关问题只在回复里提一句，不夹带进本次改动。但断线重连、心跳死线、幂等去重这类兜底是任务自带的，不算赘肉。
@@ -80,7 +80,7 @@ scp -r server/package.json server/src <vps>:<部署目录>/   # 部署目录见�
 
 ## 本机配置文件
 
-生产配置只在 VPS 上一份（`/opt/wecom-bot/config.json`），备份由用户自己管，**本机不放生产的 Bot Secret**。本机只有两份凭证文件，都不在仓库里或已被忽略：
+生产配置只在 VPS 上一份（部署目录下的 `server/config.json`），备份由用户自己管，**本机不放生产的 Bot Secret**。本机只有两份凭证文件，都不在仓库里或已被忽略：
 
 | 文件 | 内容 | 用途 |
 |---|---|---|

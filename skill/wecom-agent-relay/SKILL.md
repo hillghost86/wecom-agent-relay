@@ -45,9 +45,9 @@ cp client/config.example.json client/config.json
 
 详细步骤见仓库 `server/README.md`。要点：
 
-1. 上传 `server/`（package.json、整个 src/ 目录、config.example.json、wecom-bot.service）到 VPS `/opt/wecom-bot`，上传后确认文件属主和运行用户一致
-2. `cp config.example.json config.json`，填四个值：`bot_id`、`secret`、`http.api_token`（`openssl rand -hex 32` 生成）、`admin_userid`（收断线自报的人）；然后 `chmod 600 config.json`。systemd 单元的 `ExecStart` 已经带 `--config /opt/wecom-bot/config.json`，不用再配环境变量
-3. `npm i`，装 systemd 单元：`sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」
+1. 在 VPS 上克隆仓库：`git clone https://github.com/hillghost86/wecom-agent-relay.git /opt/wecom-agent-relay`，`git checkout <最新版本号>`，进 `server/` 执行 `npm i`
+2. 在 `server/` 下 `cp config.example.json config.json`，填四个值：`bot_id`、`secret`、`http.api_token`（`openssl rand -hex 32` 生成）、`admin_userid`（收断线自报的人）；然后 `chmod 600 config.json`。配置和数据目录已被 `.gitignore` 忽略，以后 `git pull` 升级不会碰它们
+3. 装 systemd 单元：`sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now wecom-bot`，用 `journalctl -u wecom-bot -f` 确认「订阅成功」。用宝塔「Node 项目」的：项目目录填 `server/`、启动方式 `npm start`，注意宝塔以 `www` 用户运行（见 docs/deploy.md「宝塔面板」）
 4. nginx/Caddy 把域名反代到 `http://127.0.0.1:8788` 并配 HTTPS
 
 如用户提供 SSH 访问方式并明确授权，可代为执行以上命令；否则给出命令清单由用户自行执行。

@@ -7,7 +7,7 @@
 
 ### 重构
 - **服务端拆分为 `server/src/` 下的模块**：`index.mjs`（入口）、`config.mjs`、`log.mjs`、`store.mjs`、`bot.mjs`、`wecom.mjs`、`notify.mjs`、`http/{server,auth,api}.mjs`；配置不再是模块级全局变量，由入口加载后显式传给各模块。入口改为 `src/index.mjs`（`npm start` 已指向它），自测移到 `test/mock.test.mjs`（`npm test`）。**行为无变化**：日志文字、HTTP 响应、落盘格式、配置报错与退出码逐字相同。
-- **部署影响**：升级时要上传 `package.json` 和整个 `src/`，旧的根目录 `index.mjs` 可删除；用 systemd 的要更新单元文件（`ExecStart` 改为 `node src/index.mjs --config …`，然后 `daemon-reload`）。见 [docs/deploy.md § 从单文件版本升级](docs/deploy.md#从单文件版本升级入口改为-srcindexmjs)。
+- **部署方式改为 git**：在 VPS 上克隆仓库，网关从仓库里的 `server/` 运行（`npm start`），升级就是 `git pull` 或 `git checkout <新版本>`；配置和数据目录已被忽略，拉代码不会碰它们。systemd 单元的路径改为 `/opt/wecom-agent-relay/server`。以前用上传方式部署的，按 [docs/deploy.md「从上传方式改为 git 部署」](docs/deploy.md#从上传方式改为-git-部署) 一次性迁移；宝塔用户见同一文档「宝塔面板」。
 
 ### 变更
 - **默认消息文件位置改为 `bots/<key>/messages.jsonl`**（单 bot 即 `bots/default/messages.jsonl`，`.state.json` / `.alive` 跟着进同一目录，目录启动时自动建；同目录下的 `files/` 预留给以后的媒体下载）。**不兼容旧位置，升级前必须按 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级数据文件搬进-botskey) 手工搬移，否则网关会从 seq 0 重新开始。** 显式写了 `msg_log` 的配置不受影响。

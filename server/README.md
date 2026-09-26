@@ -21,13 +21,18 @@ npm start                            # 即 node src/index.mjs；默认读工作�
 
 ## 部署到 VPS
 
+用 git 部署，升级就是 `git pull`（`<版本>` 换成最新的发布版本号，不指定就跟着 `main`）：
+
 ```bash
-# 上传 package.json、src/ 整个目录、config.json、wecom-bot.service 到 /opt/wecom-bot（确认文件属主和运行用户一致），然后：
-cd /opt/wecom-bot && npm i && chmod 600 config.json
+git clone https://github.com/hillghost86/wecom-agent-relay.git /opt/wecom-agent-relay
+cd /opt/wecom-agent-relay && git checkout <版本> && cd server && npm i
+cp config.example.json config.json && chmod 600 config.json   # 填好配置
 sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now wecom-bot
 journalctl -u wecom-bot -f
 ```
+
+升级：`cd /opt/wecom-agent-relay && git fetch --tags && git checkout <新版本>`，再重启。宝塔面板、从上传方式迁移过来的，见 [docs/deploy.md](../docs/deploy.md)。
 
 用 nginx、Caddy 或宝塔把域名反代到 `http://127.0.0.1:8788` 并开 HTTPS，证书交给反代管。
 一个机器人同时只能有一条连接，别在两台机器上同时跑。

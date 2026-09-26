@@ -1,21 +1,29 @@
 # 部署与升级
 
-网关跑在 VPS 上，以 systemd 常驻。下文假设安装目录是 `/opt/wecom-bot`，与 `server/wecom-bot.service` 一致。
+网关跑在 VPS 上常驻。推荐用 git 部署：在 VPS 上克隆仓库，网关从仓库里的 `server/` 目录运行，升级就是 `git pull`。下文假设克隆到 `/opt/wecom-agent-relay`，与 `server/wecom-bot.service` 一致；用宝塔的见下文「宝塔面板」。
 
 > **重启 = 几秒空窗。** 企微会静默丢掉机器人离线期间的消息，发送方还显示「发送成功」。任何会重启服务的操作都挑没人用的时候做。
 
 ## 首次部署
 
 1. 企微后台 → 管理工具 → 智能机器人 → 开启 API 模式 → 连接方式选「长连接」，记下 Bot ID 和 Secret（Secret 只显示一次）。
-2. VPS 装 Node ≥ 18。
-3. 上传 `server/` 下的 `package.json`、整个 `src/` 目录、`config.example.json`、`wecom-bot.service` 到 `/opt/wecom-bot/`（`src/` 保持原目录结构）。上传后确认文件属主和运行网关的用户一致。
-4. 在 VPS 上：
+2. VPS 装 Node ≥ 18 和 git。
+3. 克隆并配置（`<版本>` 换成 [Releases](https://github.com/hillghost86/wecom-agent-relay/releases) 里最新的版本号，如 `v0.3.0`；不指定就是跟着 `main` 走）：
 
 ```bash
-cd /opt/wecom-bot && npm i
+git clone https://github.com/hillghost86/wecom-agent-relay.git /opt/wecom-agent-relay
+cd /opt/wecom-agent-relay && git checkout <版本>
+cd server && npm i
 cp config.example.json config.json && chmod 600 config.json
 # 编辑 config.json：bot_id、secret、http.api_token（openssl rand -hex 32）、admin_userid
-sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
+```
+
+`config.json`、数据目录 `bots/`、`node_modules/` 都已被 `.gitignore` 忽略，以后 `git pull` 不会碰它们。
+
+4. 用 systemd 常驻：
+
+```bash
+sudo cp /opt/wecom-agent-relay/server/wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now wecom-bot
 journalctl -u wecom-bot -f      # 看到「订阅成功，开始心跳」即成功
 ```
@@ -31,6 +39,20 @@ curl -s -H "Authorization: Bearer <api_token>" https://your-domain.example.com/h
 ### node 是 nvm 装的
 
 systemd 不加载 nvm 的环境，`/usr/bin/env node` 找不到。把 `wecom-bot.service` 的 `ExecStart` 改成 `which node` 给出的绝对路径。
+
+### 宝塔面板
+
+用宝塔「网站 → Node 项目」管理进程时：
+
+- **项目目录**填克隆出来的 `server/`，如 `/www/wwwroot/wecom-agent-relay/server`；**启动方式**用 `npm start`（它运行 `node src/index.mjs`，读项目目录下的 `config.json`）。不需要 systemd 单元。
+- 宝塔以 `www` 用户运行项目。克隆和以后 `git pull` 都以 `www` 身份执行，文件属主才对；用 root 建过的文件或目录要 `chown -R www:www` 还回去，否则网关写不进数据文件。
+- 宝塔装的 Node 不在 root 的命令路径里，终端里要用完整路径，如 `/www/server/nodejs/<版本>/bin/node`。
+
+```bash
+cd /www/wwwroot && git clone https://github.com/hillghost86/wecom-agent-relay.git && chown -R www:www wecom-agent-relay
+cd wecom-agent-relay && sudo -u www git checkout <版本>
+cd server && sudo -u www env PATH=/www/server/nodejs/<版本>/bin:$PATH npm i
+```
 
 ## 反代与 HTTPS
 
@@ -59,22 +81,25 @@ location / {
 
 ## 升级
 
-大多数升级只换 `package.json` 和 `src/` 目录：
-
 ```bash
-scp -r server/package.json server/src <vps>:/opt/wecom-bot/
-ssh <vps> 'sudo systemctl restart wecom-bot && sleep 5 && journalctl -u wecom-bot -n 15 --no-pager'
+cd /opt/wecom-agent-relay && git fetch --tags && git checkout <新版本>    # 跟着 main 走的用 git pull
 ```
 
-上传后确认文件属主和运行网关的用户一致。日志里应有「消息存储已加载」和「订阅成功」。`bots/default/` 下的 `messages.jsonl`、`.state.json`、`.alive` 都保留，seq 和游标接着走。
+然后重启网关（systemd：`sudo systemctl restart wecom-bot`；宝塔：面板里重启 Node 项目；宝塔上的 git 命令加 `sudo -u www`）。日志里应有「消息存储已加载」和「订阅成功」，seq 和游标接着走。
 
-### 从单文件版本升级：入口改为 `src/index.mjs`
+- 升级前看一眼 [CHANGELOG](../CHANGELOG.md) 对应版本有没有「部署影响」：`package.json` 依赖变了要再 `npm i`；`wecom-bot.service` 变了要重新 `sudo cp` 并 `daemon-reload`。
+- 看线上是哪个版本：`git -C /opt/wecom-agent-relay describe --tags --always`。
+- 回退：`git checkout <旧版本>` 后重启。数据文件格式有变化的版本 CHANGELOG 会写明，跨这种版本回退前先看说明。
 
-以前服务端只有部署目录根下的一个 `index.mjs`，现在拆成了 `src/` 下的多个模块，入口是 `src/index.mjs`，行为不变。
+### 从上传方式改为 git 部署
 
-1. 按上面的命令上传 `package.json` 和整个 `src/`。旧的根目录 `index.mjs` 已不再使用，可以删掉。
-2. 用 systemd 的：单元文件的 `ExecStart` 改成了 `node src/index.mjs --config …`，上传新的 `wecom-bot.service` 后 `sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload`，再重启。
-   用宝塔「Node 项目」或其他按 `npm start` 启动的：`package.json` 的 `start` 已指向 `src/index.mjs`，启动命令不用改；如果当初填的是 `node index.mjs`，改成 `npm start` 或 `node src/index.mjs`。
+以前用 scp 上传文件的，一次性改成 git（要停机几分钟）：
+
+1. 按「首次部署」第 3 步克隆到新目录并 `npm i`（旧目录先不动，网关继续跑）。
+2. 停止网关。
+3. 把旧部署目录里的 `config.json` 复制到新目录的 `server/`，数据目录 `bots/` 整个移过去（还在用根目录旧数据文件的，先按下面「从 v0.2.x 升级」搬好）。属主和运行网关的用户保持一致。
+4. 把进程管理指向新目录：systemd 换上新的 `wecom-bot.service` 并 `daemon-reload`；宝塔把 Node 项目目录改成新的 `server/`，启动方式 `npm start`。
+5. 启动，核对日志里「消息存储已加载」的条数和 seq 与停机前一致。旧目录确认无误后再清理。
 
 ### 从 v0.2.x 升级：数据文件搬进 `bots/<key>/`
 
@@ -97,12 +122,10 @@ v0.2.x 的数据文件在部署目录根下（`messages.jsonl`、`messages.<key>
    ```
 
    最后一行应只列出 `bots/` 下各目录的文件；根目录还剩 `messages.*` 说明 `bots/<key>/` 里已有同名文件（比如新版本已先跑过一次），`mv -n` 跳过了，要手工比对后处理。
-3. 上传新的 `package.json` 和 `src/` 目录（见上文「升级」）。
+3. 更新代码（见上文「升级」）。
 4. 启动网关，日志里「消息存储已加载」的条数和 seq 应和停机前一致。
 
 `config.json` 里显式写了 `msg_log` 的，网关仍按那个路径走、不受这次改动影响；想用新位置就删掉那一项或改成新路径。
-
-`wecom-bot.service` 有变化时（看 CHANGELOG），多做一步 `sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload`。`package.json` 依赖有变化时再跑一次 `npm i`。
 
 ## 加一个机器人
 
@@ -124,7 +147,7 @@ curl -s -H "Authorization: Bearer <http.api_token>" https://your-domain.example.
 v0.2.0 起配置改为 `config.json`。本机可以用下面的脚本把旧 `.env` 转成 `config.json`，也可以照 [config.md § 兼容期](config.md#兼容期环境变量) 的对照表手填：
 
 ```bash
-cd /opt/wecom-bot && set -a && . ./.env && set +a && node -e '
+cd <部署目录> && set -a && . ./.env && set +a && node -e '
 const e=process.env, c={http:{host:e.HTTP_HOST||"127.0.0.1",port:Number(e.HTTP_PORT||8788),api_token:e.API_TOKEN||""},
 tz:e.TZ||"Asia/Shanghai",bots:[{key:"default",bot_id:e.WECOM_BOT_ID,secret:e.WECOM_BOT_SECRET,
 reply_text:e.REPLY_TEXT??"已收到",admin_userid:e.ADMIN_USERID||""}]};

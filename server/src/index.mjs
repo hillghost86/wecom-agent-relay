@@ -6,7 +6,7 @@
  * 各模块：config.mjs 配置 · wecom.mjs 企微长连接 · bot.mjs 单个机器人运行时 · store.mjs 消息存储
  *         notify.mjs 管理员通知 · http/ HTTP API · log.mjs 日志与格式化
  *
- * 运行：npm i && node src/index.mjs --config /opt/wecom-bot/config.json
+ * 运行：npm i && npm start（即 node src/index.mjs，读工作目录下的 config.json；别处的用 --config <路径>）
  */
 import { log } from './log.mjs';
 import { argConfigPath, loadConfig, ConfigError } from './config.mjs';

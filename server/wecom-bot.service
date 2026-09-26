@@ -1,4 +1,4 @@
-# systemd 单元：sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# systemd 单元（仓库克隆到 /opt/wecom-agent-relay 时）：sudo cp wecom-bot.service /etc/systemd/system/ && sudo systemctl daemon-reload
 [Unit]
 Description=WeCom AI Bot long-connection client
 After=network-online.target
@@ -6,9 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/wecom-bot
+WorkingDirectory=/opt/wecom-agent-relay/server
 # nvm 装的 node 不在 systemd 的 PATH 里，那种情况把下面改成 `which node` 的绝对路径
-ExecStart=/usr/bin/env node src/index.mjs --config /opt/wecom-bot/config.json
+ExecStart=/usr/bin/env node src/index.mjs --config /opt/wecom-agent-relay/server/config.json
 Restart=always
 RestartSec=5
 # 让 node 的 stdout 进 journal
