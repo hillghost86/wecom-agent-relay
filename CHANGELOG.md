@@ -3,7 +3,13 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
-## 未发布
+## v0.3.0 — 2026-09-29
+
+### 升级须知（从 v0.2.x 升级必读）
+1. **先停网关，再把数据文件搬进 `bots/<key>/`**，否则新版本会从 seq 0 重新开始。命令见 [docs/deploy.md § 从 v0.2.x 升级](docs/deploy.md#从-v02x-升级数据文件搬进-botskey)。
+2. **入口改为 `server/src/index.mjs`，推荐改用 git 部署**：宝塔等用 `npm start` 的不用改启动命令；systemd 单元路径变了，要换新的 `wecom-bot.service` 并 `daemon-reload`。见 [docs/deploy.md § 从上传方式改为 git 部署](docs/deploy.md#从上传方式改为-git-部署)。
+3. **配置校验变严了**：数值项写错、`key` 不是字符串时会拒绝启动并说明原因。升级前可以先用新代码校验一次现有配置（见 deploy.md）。
+4. **客户端**：`/ack` 必须带非负整数 `seq`，否则返回 400。用 `poll.mjs` 的不受影响。
 
 ### 重构
 - **服务端拆分为 `server/src/` 下的模块**：`index.mjs`（入口）、`config.mjs`、`log.mjs`、`store.mjs`、`bot.mjs`、`wecom.mjs`、`notify.mjs`、`http/{server,auth,api}.mjs`；配置不再是模块级全局变量，由入口加载后显式传给各模块。入口改为 `src/index.mjs`（`npm start` 已指向它），自测移到 `test/mock.test.mjs`（`npm test`）。**行为无变化**：日志文字、HTTP 响应、落盘格式、配置报错与退出码逐字相同。
@@ -32,10 +38,10 @@
 - 配置了多个 bot 时日志每行带 `[<key>]` 前缀；只有一个 bot 时日志与以前逐字相同。
 
 ### 文档
-- `docs/config.md` 加 `bots[].api_token`、两级 token 与多机器人配置示例；`docs/api.md` 加「多 bot 路由」与 `GET /bots`；`docs/deploy.md` 加「加一个机器人」；`docs/presence.md`、`docs/roadmap.md`、`docs/agent-integration.md`、`server/README.md`、根 README 同步。`server/config.example.json` 的 `bots[0]` 加空的 `api_token`（留空即只用管理员 token）。
+- `docs/config.md` 加 `bots[].api_token`、两级 token 与多机器人配置示例；`docs/api.md` 加「多 bot 路由」与 `GET /bots`；`docs/deploy.md` 加「加一个机器人」；`docs/presence.md`、`docs/roadmap.md`、`docs/agent-integration.md`、`server/README.md`、根 README 同步；部署文档全部改为 git 方式，补宝塔面板说明。`server/config.example.json` 的 `bots[0]` 加空的 `api_token`（留空即只用管理员 token）。
 
 ### 测试
-- `test_mock.mjs` 从 39 项扩到 61 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀；另加 `msg_log` 空字符串走默认路径、`"off"` 启动警告两项。之后扩到 76 项，覆盖上面「修复」各条；为满足 `ping_interval_ms` ≥ 1000，自测里的心跳间隔从 300ms 改为 1000ms。
+- 自测（现为 `server/test/mock.test.mjs`，`npm test`）从 39 项扩到 61 项，新增第 12 节多 bot：另起两 bot 进程，覆盖各自订阅与落盘、前缀路由、401/403/404、`GET /bots`、presence 按 bot 分开、client 用 `…/bots/<key>` 零改动、多 bot 配置校验、日志前缀；另加 `msg_log` 空字符串走默认路径、`"off"` 启动警告两项。之后扩到 76 项，覆盖上面「修复」各条；为满足 `ping_interval_ms` ≥ 1000，自测里的心跳间隔从 300ms 改为 1000ms。
 
 ## v0.2.1 — 2026-09-24
 

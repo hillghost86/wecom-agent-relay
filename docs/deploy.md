@@ -88,6 +88,13 @@ cd /opt/wecom-agent-relay && git fetch --tags && git checkout <新版本>    # �
 然后重启网关（systemd：`sudo systemctl restart wecom-bot`；宝塔：面板里重启 Node 项目；宝塔上的 git 命令加 `sudo -u www`）。日志里应有「消息存储已加载」和「订阅成功」，seq 和游标接着走。
 
 - 升级前看一眼 [CHANGELOG](../CHANGELOG.md) 对应版本有没有「部署影响」：`package.json` 依赖变了要再 `npm i`；`wecom-bot.service` 变了要重新 `sudo cp` 并 `daemon-reload`。
+- 升级前可以先用新代码校验现有配置（只读配置文件，不连企微，不影响正在运行的网关），在仓库的 `server/` 目录下执行：
+
+  ```bash
+  node -e 'import("./src/config.mjs").then(m=>{const c=m.loadConfig("config.json");console.log("配置校验通过：", c.bots.map(b=>b.key).join(", "))}).catch(e=>{console.error(e.message);process.exit(1)})'
+  ```
+
+  宝塔用户把 `node` 换成宝塔 Node 的完整路径，并以 `www` 身份执行（`config.json` 只有它能读）。
 - 看线上是哪个版本：`git -C /opt/wecom-agent-relay describe --tags --always`。
 - 回退：`git checkout <旧版本>` 后重启。数据文件格式有变化的版本 CHANGELOG 会写明，跨这种版本回退前先看说明。
 
