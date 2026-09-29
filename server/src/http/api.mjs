@@ -1,5 +1,14 @@
 // HTTP API 各路由的处理函数：只算结果，返回 [状态码, 响应对象]，由 server.mjs 写成 JSON
+import fs from 'node:fs';
+import path from 'node:path';
+import { FILE_TYPES } from '../media.mjs';
+
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
+// 含图片的记录在顶层附 media；返回拷贝，内存里的原记录不能被改（它就是落盘的那一行）
+const withMedia = (bot, r) => {
+  const media = bot.media.statusOf(r.seq, r);
+  return media ? { ...r, media } : r;
+};
 
 export const healthOf = (bot) => ({
   ok: true,
@@ -33,14 +42,29 @@ export function listMessages(bot, searchParams) {
   const after = afterRaw !== null ? Number(afterRaw) : store.cursor;
   const limit = Math.min(Math.max(Number(limitRaw || 50), 1), 500);
   const kind = searchParams.get('kind') || '';
-  const messages = store.list({ after, limit, kind });
+  const messages = store.list({ after, limit, kind }).map((r) => withMedia(bot, r));
   return [200, { ok: true, after, cursor: store.cursor, seq: store.seq, messages, next: messages.length ? messages[messages.length - 1].seq : after }];
 }
 
 /** GET /messages/<seq> */
 export function getMessage(bot, seq) {
   const r = bot.store.get(seq);
-  return r ? [200, { ok: true, message: r }] : [404, { ok: false, error: 'not found' }];
+  return r ? [200, { ok: true, message: withMedia(bot, r) }] : [404, { ok: false, error: 'not found' }];
+}
+
+/**
+ * GET /files/<YYYY-MM>/<文件名>：成功返回 [200, null, { file, type, size }]，由 server.mjs 流式写出文件。
+ * rel 不做 URL 解码：合法文件名只有数字和扩展名，%2F 之类原样落到正则上被拒
+ */
+export function mediaFile(bot, rel) {
+  if (!bot.media.dir) return [404, { ok: false, error: 'file not found' }];   // msg_log=off 的 bot 没有媒体功能
+  if (!/^\d{4}-\d{2}\/\d+-\d+\.(jpg|png|gif|webp|bin)$/.test(rel)) return [400, { ok: false, error: 'bad file path' }];
+  const file = bot.media.resolve(rel);
+  if (!file) return [400, { ok: false, error: 'bad file path' }];
+  let st;
+  try { st = fs.statSync(file); } catch { st = null; }
+  if (!st?.isFile()) return [404, { ok: false, error: 'file not found' }];
+  return [200, null, { file, type: FILE_TYPES[path.extname(file).slice(1)], size: st.size }];
 }
 
 /** GET|POST /ack?seq= */

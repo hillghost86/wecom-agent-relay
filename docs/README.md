@@ -21,12 +21,13 @@
 |---|---|---|
 | 连企微长连接、心跳、断线重连 | `server/src/wecom.mjs` `BotConnection` | [protocol.md](protocol.md) |
 | 消息落盘、seq、游标 | `server/src/store.mjs` `MessageStore` | [api.md § 消息记录格式](api.md#消息记录格式) |
+| 图片下载（收到即下载解密、`media` 字段、`/files`、过期清理） | `server/src/media.mjs` `MediaStore`；客户端 `client/poll.mjs --download` | [api.md § media 字段](api.md#media-字段) |
 | 秒回「已收到」/ 离线文案 | `server/src/wecom.mjs` `replyTextNow` | [presence.md](presence.md) |
 | 断线自报（重连后告诉管理员离线了多久） | `server/src/wecom.mjs` `reportOutage`（空窗与节流）、`server/src/notify.mjs` `sendOutageReport`（内容与发送） | [deploy.md § 断线自报](deploy.md#断线自报) |
 | 管理员离线告警 | `server/src/notify.mjs` `startOfflineAlert` | [presence.md § 管理员离线告警](presence.md#管理员离线告警) |
 | HTTP API 与鉴权 | `server/src/http/`：`server.mjs` `startHttpServer`（路由）、`auth.mjs`（鉴权判定）、`api.mjs`（各接口） | [api.md](api.md) |
 | 哨兵（发现新消息即退出） | `client/sentinel.mjs` | [agent-integration.md](agent-integration.md) |
-| 拉取 / 回复 / 推送 / ack 命令行 | `client/poll.mjs` | [agent-integration.md § poll.mjs](agent-integration.md#pollmjs-命令) |
+| 拉取 / 下载图片 / 回复 / 推送 / ack 命令行 | `client/poll.mjs` | [agent-integration.md § poll.mjs](agent-integration.md#pollmjs-命令) |
 | WorkBuddy 一句话安装 | `skill/wecom-agent-relay/SKILL.md` | 技能包自带 |
 | 假网关自测 | `server/test/mock.test.mjs` | [deploy.md § 自测](deploy.md#自测) |
 

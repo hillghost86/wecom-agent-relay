@@ -174,13 +174,17 @@ require("fs").writeFileSync("config.json",JSON.stringify(c,null,2));' && chmod 6
 
 ## 数据文件
 
-都在 `msg_log` 旁边（默认是工作目录下的 `bots/<key>/`，每个 bot 一个目录）。下表以单 bot 为例；多个机器人时每个 bot 一组，文件是 `bots/<key>/messages.jsonl` 及其 `.state.json` / `.alive`。同目录下的 `files/` 是预留给以后媒体下载的位置，目前网关不会创建：
+都在 `msg_log` 旁边（默认是工作目录下的 `bots/<key>/`，每个 bot 一个目录）。下表以单 bot 为例；多个机器人时每个 bot 一组，文件是 `bots/<key>/messages.jsonl` 及其 `.state.json` / `.alive`。同目录下的 `files/` 存网关下载的图片（第一次收到图片时创建）：
 
 | 文件 | 内容 | 能不能删 |
 |---|---|---|
 | `bots/default/messages.jsonl` | 全部消息与事件，一行一条，只追加 | 删了 seq 从 0 重来，历史丢失 |
 | `bots/default/messages.jsonl.state.json` | 游标、处理端最后露面时刻与 id | 删了游标归零，agent 会重拉全部历史 |
 | `bots/default/messages.jsonl.alive` | 最后一次心跳的时刻 | 可以删，只影响下一次断线自报 |
+| `bots/default/files/<YYYY-MM>/<seq>-<n>.<ext>` | 网关收到图片时下载解密好的原图，第 n 张 | 可以删，之后 API 里这张图显示 `deleted`，客户端取不到网关那份 |
+| `bots/default/files/index.jsonl` | 每张图的下载结果（成功 / 失败），只追加 | 删了之后已下载的图在 API 里显示 `missing` |
+
+图片按 `media_keep_days`（默认 90 天，`0` 永久保留）清理：网关启动时和之后每 24 小时各查一次，删掉修改时间早于这个天数的文件，删完的空月份目录一起删；`index.jsonl` 不动。`msg_log` 为 `"off"` 的 bot 不下载图片。
 
 启动时整份文件读进内存；运行中内存超过 10000 条后，每来一条新的就丢掉内存里最早的一条（文件里仍在，但 `/messages` 查不到，重启后又能查到）。文件目前不做轮转，长期运行可自行按月归档（先停服务）。
 

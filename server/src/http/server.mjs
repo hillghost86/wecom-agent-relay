@@ -10,6 +10,8 @@
  *   GET  /health                         连接状态 + 处理端在线状态
  *   GET  /messages?after=<seq>&limit=50  拉 seq 大于 after 的消息（默认 after=已确认游标，limit 默认 50 最多 500）
  *   GET  /messages/<seq>                 按 seq 取单条，不存在返回 404
+ *        含图片的记录顶层多一个 media: [{ n, status, file?, bytes?, type?, error? }]（网关收到即下载）
+ *   GET  /files/<YYYY-MM>/<seq>-<n>.<ext> 取网关下载好的图片（media[].file），路径不合规 400、不存在 404
  *   GET  /ack?seq=<seq>                  把游标推进到 seq（之后 /messages 不带 after 时从这里开始）
  *   POST /send  {body}                   透传为 aibot_send_msg 帧（主动推送），返回企微回执
  *        body 规则（官方文档）：msgtype 只支持 markdown/template_card/file/image/voice/video，没有 text；
@@ -21,6 +23,7 @@
  * 鉴权判定顺序 401 → 403 → 404，unknown bot 的 404 放在鉴权之后，免得未鉴权的人拿它探测 key 是否存在。
  */
 import http from 'node:http';
+import fs from 'node:fs';
 import { log, warn } from '../log.mjs';
 import { isLoopback } from '../config.mjs';
 import { authEnabled, tokenFrom, checkAccess } from './auth.mjs';
@@ -34,6 +37,11 @@ const clientIp = (req) => {
 const json = (res, code, obj) => {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
+};
+// 文件流式写出；读到一半出错只能断开，头已经发出去了
+const sendFile = (res, { file, type, size }) => {
+  res.writeHead(200, { 'content-type': type, 'content-length': size });
+  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
 };
 const readBody = (req) => new Promise((resolve, reject) => {
   let b = '';
@@ -79,6 +87,10 @@ export function startHttpServer(bots, gw) {
       if (req.method === 'GET' && pathname === '/messages') return json(res, ...api.listMessages(bot, url.searchParams));
       const one = req.method === 'GET' && pathname.match(/^\/messages\/(\d+)$/);
       if (one) return json(res, ...api.getMessage(bot, Number(one[1])));
+      if (req.method === 'GET' && pathname.startsWith('/files/')) {
+        const [code, body, found] = api.mediaFile(bot, pathname.slice('/files/'.length));
+        return found ? sendFile(res, found) : json(res, code, body);
+      }
       if ((req.method === 'GET' || req.method === 'POST') && pathname === '/ack') return json(res, ...api.ack(bot, url.searchParams));
       if (req.method === 'POST' && pathname === '/send') return json(res, ...(await api.send(bot, () => readBody(req))));
       return json(res, 404, { ok: false, error: 'not found' });

@@ -92,7 +92,7 @@ function decryptMedia(buf, aeskey) {
 }
 ```
 
-URL 只有 300 秒，agent 被唤醒再下载可能已经过期，所以最终要由网关在收到时就下载（见 [roadmap.md](roadmap.md)）。
+URL 只有 300 秒，agent 被唤醒再下载可能已经过期。所以本项目的设计是：网关收到图片就下载解密存一份；客户端 `poll.mjs --download` 在 280 秒内先直连企微，失败或过期再从网关取那份（见 [api.md § media 字段](api.md#media-字段)）。这是实现上的选择，不是协议事实。
 
 回调 URL 模式还多一层「消息体加密」（`EncodingAESKey` + SHA1 签名，明文里再包随机串、长度和企业 id）。长连接模式没有这一层。
 

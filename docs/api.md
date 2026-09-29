@@ -73,6 +73,17 @@ VPS 网关（`server/src/index.mjs`，接口实现在 `server/src/http/`）在 `
 
 按 seq 取单条：`{ "ok": true, "message": {…} }`，不存在返回 `404 {"ok":false,"error":"not found"}`。
 
+## GET /files/\<YYYY-MM\>/\<文件名\>
+
+取网关已经下载好的图片，路径就是消息记录里 [`media[].file`](#media-字段) 的值，如 `GET /files/2026-09/16-1.jpg`。同样可以加 `/bots/<key>` 前缀。
+
+- 鉴权、401 / 403 / 404 判定、`X-Relay-Agent` 的处理和其他接口完全一样。浏览器里打开可以用 `?token=`。
+- 路径必须是 `<4 位年>-<2 位月>/<数字>-<数字>.<jpg|png|gif|webp|bin>`，否则 `400 {"ok":false,"error":"bad file path"}`。不做 URL 解码，`..%2F` 之类一律 400。
+- 文件不存在（从没下成功、已被 [`media_keep_days`](config.md#顶层) 清理）返回 `404 {"ok":false,"error":"file not found"}`。`msg_log` 为 `"off"` 的 bot 没有媒体功能，一律 404。
+- 成功返回 200 和文件原始字节（已解密），`content-type` 按扩展名：`image/jpeg`、`image/png`、`image/gif`、`image/webp`、`application/octet-stream`（`bin`），带 `content-length`。
+
+一般不用手拼：`client/poll.mjs --download <seq>` 会先直连企微，失败再走这个接口，见 [agent-integration.md](agent-integration.md#pollmjs-命令)。
+
 ## GET /ack?seq=\<seq\>
 
 把游标推进到 seq（也接受 POST）。返回 `{ "ok": true, "cursor": <推进后的游标> }`。
@@ -124,7 +135,7 @@ curl -s -X POST "$BOT_API/send" -H "Authorization: Bearer $BOT_TOKEN" -H 'Conten
 | `chatid` | 群聊才有，是 `/send` 群推时要填的值 |
 | `msgtype` | `text` / `image` / `voice` / `mixed` / `event` 等 |
 | `text.content` | 文本内容 |
-| `image.url` + `image.aeskey` | 图片：加密文件的下载地址（300 秒过期）和解密密钥，见 [protocol.md § 媒体文件加密](protocol.md#媒体文件加密) |
+| `image.url` + `image.aeskey` | 图片：加密文件的下载地址（300 秒过期）和解密密钥，见 [protocol.md § 媒体文件加密](protocol.md#媒体文件加密)。网关收到就会下载，结果看记录顶层的 [`media`](#media-字段) |
 | `voice.content` | 语音：企微只给转写后的文字，不给音频 |
 | `mixed.msg_item[]` | 图文混排，每项各自带 `msgtype` |
 | `event.eventtype` | 事件类型，如 `enter_chat`（用户点开聊天窗）、`disconnected_event`（连接被踢） |
@@ -132,6 +143,30 @@ curl -s -X POST "$BOT_API/send" -H "Authorization: Bearer $BOT_TOKEN" -H 'Conten
 | `response_url` | 这条消息专用的回复地址，1 小时内一次，见 [protocol.md § response_url](protocol.md#response_url-回复) |
 
 事件记录（`kind: "event"`）也占 seq，但不计入 `pending`、不唤醒哨兵。
+
+### media 字段
+
+图片消息（`msgtype: "image"`，以及 `msgtype: "mixed"` 里的图片项）网关一收到就下载解密，存到 `bots/<key>/files/<YYYY-MM>/<seq>-<n>.<ext>`（年月取 `received_at` 的 UTC 年月）。`/messages` 和 `/messages/<seq>` 返回这类记录时，在记录**顶层**（和 `seq`、`kind`、`body` 同级）多一个 `media` 数组，每张图一项：
+
+```json
+{
+  "seq": 16, "kind": "message", "body": { "msgtype": "image", "image": { "url": "…", "aeskey": "…" }, … },
+  "media": [ { "n": 1, "status": "ok", "file": "2026-09/16-1.jpg", "bytes": 48213, "type": "jpg" } ]
+}
+```
+
+- `n`：第几张图，从 1 起。单图消息只有 `n: 1`；mixed 按出现顺序编号，只数图片项。
+- `media` 是返回时现算的，**不写进 `messages.jsonl`**，`body` 也原样不动。不含图片的记录没有这个字段；`msg_log` 为 `"off"` 的 bot 不下载，也不附这个字段。
+
+| `status` | 含义 | 其他字段 |
+|---|---|---|
+| `ok` | 已下载，文件在 | `file`（相对路径，拼到 [`GET /files/`](#get-filesyyyy-mm文件名) 后面取）、`bytes`、`type`（`jpg` / `png` / `gif` / `webp`，认不出为 `bin`） |
+| `pending` | 正在下载（含失败后等待重试） | |
+| `failed` | 下载最终失败：重试 2 次（间隔 5 秒、15 秒）仍失败，或超过 [`media_max_mb`](config.md#顶层)、解密失败（这两种不重试） | `error`：失败原因 |
+| `deleted` | 下载成功过，但文件已按 `media_keep_days` 清理 | |
+| `missing` | 没有任何下载记录，多半是下载途中网关重启了 | |
+
+下载记录追加在 `bots/<key>/files/index.jsonl`，每行 `{ seq, n, status, file?, bytes?, type?, error?, at }`，重启时读回内存。
 
 ## 一个完整的处理循环
 

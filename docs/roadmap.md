@@ -2,12 +2,10 @@
 
 已定下来的方向和结论。未开始的事项不承诺时间。
 
-## 下一步：多媒体
+## 下一步：多媒体（文件 / 视频）
 
-- **第一步，客户端下载**：给 `poll.mjs` 加 `--download <seq>`，在 300 秒内下载图片并按 [protocol.md § 媒体文件加密](protocol.md#媒体文件加密) 解密落到本地。改动小，但 agent 被唤醒晚于 300 秒就拿不到。
-- **第二步，网关下载**：网关收到图片 / 文件 / 视频消息时立即下载解密，存到 `bots/<key>/files/`，消息记录里加本地路径，新增 `GET /media/<file>` 接口。彻底解决 URL 过期。
+- 图片已完成（见下文「已完成」）。文件、视频消息**等真实样本**：先各发一次实测字段是否和图片一样带 `url` + `aeskey`，一样的话沿用图片的下载、`media` 字段和 `/files` 接口。
 - 语音已经是文字，不需要处理。
-- 需要实测：文件、视频消息的字段是否和图片一致。
 - 可借用官方 SDK 的 `downloadFile` / `decryptFile`，不换连接层。
 
 ## 以后
@@ -18,6 +16,7 @@
 
 ## 已完成
 
+- **图片下载**（多媒体第一、二步）：网关收到图片（含 mixed 里的图片）立即下载解密，存到 `bots/<key>/files/`，消息记录返回时附 `media` 状态，新增 `GET /files/…` 接口，按 `media_keep_days` 清理；`poll.mjs --download <seq>` 先直连企微、失败再从网关兜底。见 [api.md § media 字段](api.md#media-字段)、[agent-integration.md](agent-integration.md#pollmjs-命令)。
 - **多 bot**：`config.json` 的 `bots` 可以配多个，同一个进程里每个 bot 各自一条连接、各自的 `bots/<key>/messages.jsonl` 和游标、各自的在线状态与断线自报。接口加前缀 `/bots/<key>/…`，无前缀接口指向 `bots` 里第一个；token 分管理员和 bot 两级；管理员可用 `GET /bots` 看全部状态。约定一个 agent 对应一个 bot。见 [config.md § 配置多个机器人](config.md#配置多个机器人)、[api.md § 多 bot 路由](api.md#多-bot-路由)。
 
 ## 已决定不做

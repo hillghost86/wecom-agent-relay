@@ -3,6 +3,18 @@
 格式参考 Keep a Changelog；版本号对应 GitHub Release 的 tag。
 「未发布」是已提交到 main、尚未打 tag 的改动。
 
+## 未发布
+
+### 新增
+- **图片下载（服务端）**：网关收到图片消息（`msgtype: image`，以及 `mixed` 里的图片项）立即下载并解密，存到 `bots/<key>/files/<YYYY-MM>/<seq>-<n>.<ext>`，下载结果追加到 `files/index.jsonl`。下载在后台进行，不影响 5 秒内的「已收到」回帧；失败重试 2 次（间隔 5 秒、15 秒，距收到超过 280 秒不再重试）。`msg_log` 为 `"off"` 的 bot 不下载。
+- **`media` 字段**：`/messages`、`/messages/<seq>` 返回含图片的记录时，在记录顶层附 `media: [{ n, status, file?, bytes?, type?, error? }]`，`status` 为 `ok` / `pending` / `failed` / `deleted` / `missing`。只在返回时附加，落盘格式不变；不含图片的记录保持原样。
+- **`GET /files/<YYYY-MM>/<文件名>`**：取网关下载好的图片（也支持 `/bots/<key>/` 前缀），鉴权与其他接口一致；路径不合规 400，不存在 404。
+- **配置项** `media_keep_days`（默认 90，`0` 永久保留；启动时和每 24 小时清理一次过期文件）、`media_max_mb`（默认 20，单张图片上限）。
+- **`poll.mjs --download <seq> [目录]`**：下载一条消息里的图片，默认存到 `client/downloads/`。收到 280 秒内先直连企微下载、本机解密，失败或过期再从网关 `/files` 兜底；每张图打印保存路径和来源（企微直连 / 网关兜底），有一张失败就退出 1。
+
+### 修复
+- 服务端日志和 `poll.mjs` 拉取摘要不再输出图片的下载地址和解密密钥：日志里 `image.url`（含 `mixed` 里每张图的）只留末 8 位、`aeskey` 显示为 `***`，与 `response_url` 的遮法一致；拉取摘要里图片消息显示为 `[图片 x<张数>]（用 --download <seq> 下载）`。落盘记录和 API 返回仍是完整原值。
+
 ## v0.3.0 — 2026-09-29
 
 ### 升级须知（从 v0.2.x 升级必读）

@@ -1,13 +1,16 @@
 /**
  * wecom-agent-relay · agent 侧客户端
  *
- * 对消息做处理的命令行工具：拉取 / 单条取 / 回复 / 推送 / 推进游标。
+ * 对消息做处理的命令行工具：拉取 / 单条取 / 下载图片 / 回复 / 推送 / 推进游标。
  *
  * 用法：
  *   node client/poll.mjs                    # 拉取新消息（默认从服务端游标起，不拉历史）
  *   node client/poll.mjs --after <seq>      # 从指定 seq 之后拉取
  *   node client/poll.mjs --get <seq>        # 按 seq 取单条（404 = 不存在）
  *   node client/poll.mjs --health           # 连接状态
+ *   node client/poll.mjs --download <seq> [目录]         # 下载该消息里的图片（默认存到脚本旁的 downloads/）
+ *        刚收到（280 秒内）先直连企微下载并本机解密，不行再从网关取它收到时已下好的那份；
+ *        文件名 <seq>-<n>.<ext>，每张图一行结果，有一张失败就退出 1
  *   node client/poll.mjs --reply <seq> <markdown 文本>   # 用该消息的 response_url 回复
  *   node client/poll.mjs --send <chatid> <markdown 文本> # 主动推送（response_url 过期后的备选）
  *   node client/poll.mjs --ack <seq>        # 推进服务端游标
@@ -21,6 +24,7 @@
  * - 回复 msgtype 只支持 markdown / template_card，text 会被拒；HTTP 200 不代表成功，必须看 body.errcode
  * - /send 的字段是 chatid（单聊填 userid、群聊填群 chatid）；企微拒绝时返回 200 且 ok:false，errcode 在 resp 里
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,6 +94,127 @@ if (ackIdx >= 0 && /^\d+$/.test(args[ackIdx + 1] ?? '')) {
   const c = r.body?.cursor;
   console.log(r.status === 200 ? `游标已推进到 ${c}${c < Number(seq) ? `（请求 ${seq}，已钳到当前最大 seq）` : ''}` : `失败 ${r.status}: ${JSON.stringify(r.body)}`);
   process.exit(r.status === 200 ? 0 : 1);
+}
+
+/* ---- 图片：找图、解密、认格式，与 server/src/media.mjs 保持一致（client 零依赖、单文件，所以复制一份） ---- */
+function imagesOf(body) {
+  if (!body || typeof body !== 'object') return [];
+  if (body.msgtype === 'image') return [{ n: 1, url: body.image?.url, aeskey: body.image?.aeskey }];
+  if (body.msgtype !== 'mixed' || !Array.isArray(body.mixed?.msg_item)) return [];
+  const out = [];
+  for (const it of body.mixed.msg_item) {
+    if (it?.msgtype === 'image') out.push({ n: out.length + 1, url: it.image?.url, aeskey: it.image?.aeskey });
+  }
+  return out;
+}
+// AES-256-CBC，key = base64(aeskey + '=')，iv = key 前 16 字节；PKCS#7 但块长 32，内置去填充按 16 算所以关掉
+function decryptMedia(buf, aeskey) {
+  const key = Buffer.from(String(aeskey) + '=', 'base64');
+  if (key.length !== 32) throw new Error('aeskey 长度不对');
+  if (!buf.length || buf.length % 16) throw new Error('密文长度不是 16 的倍数');
+  const d = crypto.createDecipheriv('aes-256-cbc', key, key.subarray(0, 16));
+  d.setAutoPadding(false);
+  const out = Buffer.concat([d.update(buf), d.final()]);
+  const pad = out[out.length - 1];
+  if (!(pad >= 1 && pad <= 32) || pad > out.length) throw new Error('解密失败：填充不合法');
+  for (let i = out.length - pad; i < out.length; i++) if (out[i] !== pad) throw new Error('解密失败：填充不合法');
+  return out.subarray(0, out.length - pad);
+}
+function detectExt(buf) {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (buf.length >= 4 && buf.subarray(0, 4).toString('latin1') === 'GIF8') return 'gif';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return 'bin';
+}
+const MAX_BYTES = 20 * 1024 * 1024;
+// 读响应体并限大小；报错文字里不带 url（签名地址就是下载凭证）
+async function readCapped(res) {
+  const len = Number(res.headers.get('content-length'));
+  if (len > MAX_BYTES) { res.body?.cancel().catch(() => {}); throw new Error(`文件 ${len} 字节，超过 20MB`); }
+  const chunks = [];
+  let total = 0;
+  for await (const c of res.body) {
+    total += c.length;
+    if (total > MAX_BYTES) throw new Error('文件超过 20MB，已中止');
+    chunks.push(c);
+  }
+  return Buffer.concat(chunks);
+}
+const fetchErr = (e) => (e?.name === 'TimeoutError' ? '超时（30 秒）' : e?.cause?.code ? `网络错误（${e.cause.code}）` : e?.message || '未知错误');
+
+if (args.includes('--download')) {
+  const i = args.indexOf('--download');
+  const seq = args[i + 1];
+  const dirArg = args[i + 2] && !args[i + 2].startsWith('--') ? args[i + 2] : path.join(__dirname, 'downloads');
+  const dir = path.resolve(dirArg);
+  const getMsg = async () => {
+    const r = await api(`/messages/${seq}`);
+    if (r.status === 404) { console.error(`seq=${seq} 不存在`); process.exit(1); }
+    if (r.status !== 200) {
+      console.error(`取消息失败 HTTP ${r.status}: ${(typeof r.body === 'string' ? r.body : JSON.stringify(r.body)).slice(0, 300)}`);
+      process.exit(1);
+    }
+    return r.body?.message || {};
+  };
+  let msg = await getMsg();
+  const imgs = imagesOf(msg.body);
+  if (!imgs.length) { console.error(`seq=${seq} 没有图片`); process.exit(1); }
+  fs.mkdirSync(dir, { recursive: true });
+  // 企微 URL 300 秒失效，留 20 秒余量；过了就直接找网关
+  const fresh = Date.now() - Date.parse(msg.received_at) < 280000;
+  const save = (n, ext, buf, from) => {
+    const f = path.join(dir, `${seq}-${n}.${ext}`);
+    fs.writeFileSync(f, buf);
+    console.log(`已保存 ${f}（${from}）`);
+  };
+  const mediaOf = (m, n) => (Array.isArray(m.media) ? m.media.find((x) => x.n === n) : undefined);
+  let failed = 0;
+  for (const img of imgs) {
+    let direct = fresh ? '' : '已超过 280 秒，未直连';
+    if (fresh) {
+      try {
+        if (!img.url || !img.aeskey) throw new Error('消息里没有 url 或 aeskey');
+        const res = await fetch(img.url, { signal: AbortSignal.timeout(30000) });
+        if (!res.ok) { res.body?.cancel().catch(() => {}); throw new Error(`HTTP ${res.status}`); }
+        const plain = decryptMedia(await readCapped(res), img.aeskey);
+        const ext = detectExt(plain);
+        // 认不出格式多半是解错了（填充碰巧合法），按失败处理，交给网关那份
+        if (ext === 'bin') throw new Error('解密结果不是可识别的图片');
+        save(img.n, ext, plain, '企微直连');
+        continue;
+      } catch (e) {
+        direct = `直连失败：${fetchErr(e)}`;
+      }
+    }
+    // 兜底：网关收到消息时已经下过；还在下就每 2 秒再看一次，最多 30 秒
+    let st = mediaOf(msg, img.n);
+    const t0 = Date.now();
+    while (st?.status === 'pending' && Date.now() - t0 < 30000) {
+      await new Promise((r) => setTimeout(r, 2000));
+      msg = await getMsg();
+      st = mediaOf(msg, img.n);
+    }
+    let why;
+    if (!st) why = '网关没有返回这张图的下载状态（网关版本过旧或未开启落盘）';
+    else if (st.status === 'ok') {
+      try {
+        const res = await fetch(`${BASE}/files/${st.file}`, { headers: H, signal: AbortSignal.timeout(30000) });
+        if (!res.ok) { res.body?.cancel().catch(() => {}); throw new Error(`HTTP ${res.status}`); }
+        save(img.n, st.type || path.extname(st.file).slice(1), await readCapped(res), '网关兜底');
+        continue;
+      } catch (e) {
+        why = `从网关取文件失败：${fetchErr(e)}`;
+      }
+    } else if (st.status === 'pending') why = '网关 30 秒内仍未下载完';
+    else if (st.status === 'failed') why = `网关下载也失败了：${st.error || '未知原因'}`;
+    else if (st.status === 'deleted') why = '网关上的文件已过保留期被清理';
+    else if (st.status === 'missing') why = '网关没有这张图的下载记录（可能下载途中网关重启）';
+    else why = `网关状态 ${st.status}`;
+    failed++;
+    console.error(`第 ${img.n} 张失败：${direct}；${why}`);
+  }
+  process.exit(failed ? 1 : 0);
 }
 
 if (args.includes('--reply')) {
@@ -170,7 +295,9 @@ for (const m of msgs) {
   const b = m.body || {};
   const isGroup = !!b.chatid;
   const who = b.from?.userid || '?';
-  const content = b.text?.content || JSON.stringify(b.text || b.voice || b.image || {});
+  // 图片只报张数：url 是下载凭证、aeskey 能解开图片，不往终端打
+  const imgN = imagesOf(b).length;
+  const content = imgN ? `[图片 x${imgN}]（用 --download ${m.seq} 下载）` : b.text?.content || JSON.stringify(b.text || b.voice || {});
   // 企微消息体不带时间，用网关收到的时刻
   const when = m.received_at ? new Date(m.received_at).toLocaleString('zh-CN', { hour12: false }) : '';
   console.log(`\n[seq=${m.seq}] ${isGroup ? '群聊 ' + b.chatid : '单聊'} 来自 ${who} @ ${when}`);

@@ -1,7 +1,8 @@
-// 一个机器人的全部运行时：存储、去重、处理端在线状态、.alive 心跳时刻；连接对象由入口挂到 bot.conn
+// 一个机器人的全部运行时：存储、媒体下载、去重、处理端在线状态、.alive 心跳时刻；连接对象由入口挂到 bot.conn
 import fs from 'node:fs';
 import { tagged } from './log.mjs';
 import { MessageStore } from './store.mjs';
+import { MediaStore } from './media.mjs';
 
 export class Bot {
   constructor(conf, gw) {
@@ -11,6 +12,7 @@ export class Bot {
     const logger = tagged(conf.tag);
     Object.assign(this, logger);   // this.log / this.warn，BotConnection 和告警也用它
     this.store = new MessageStore(conf.msgLog, logger);
+    this.media = new MediaStore(this.store.file, gw, logger);   // msg_log=off 时 store.file 为 null，媒体功能随之关闭
     // 最后在线时刻：每次心跳写一次，重启后用来算空窗
     this.aliveFile = this.store.file ? this.store.file + '.alive' : null;
     this.seenMsgIds = new Set();

@@ -54,6 +54,7 @@ agent 处理消息的工具。所有请求都带 `X-Relay-Agent`。
 | `node client/poll.mjs --ack <seq>` | 直接把游标推进到 seq |
 | `node client/poll.mjs --get <seq>` | 取单条完整 JSON |
 | `node client/poll.mjs --health` | 打印 `/health` |
+| `node client/poll.mjs --download <seq> [目录]` | 下载这条消息里的图片，存成 `<目录>/<seq>-<n>.<ext>`（目录默认脚本旁的 `downloads/`）。收到 280 秒内先直连企微下载、本机解密；不行再从网关取它收到时已下好的那份（[`GET /files/…`](api.md#get-filesyyyy-mm文件名)），网关还在下就每 2 秒再看一次、最多等 30 秒。每张图打印一行：`已保存 <绝对路径>（企微直连｜网关兜底）` 或 `第 <n> 张失败：<原因>`，有一张失败就退出 1 |
 | `node client/poll.mjs --reply <seq> <markdown>` | 用这条消息的 `response_url` 回复，检查 `errcode` 后报成败 |
 | `node client/poll.mjs --send <chatid> <markdown>` | 经网关 `/send` 主动推送（`response_url` 过期后用） |
 
@@ -65,6 +66,7 @@ agent 处理消息的工具。所有请求都带 `X-Relay-Agent`。
 哨兵退出，输出 NEW_MSG count=2 seq=31-33 …
   → GET /messages?after=30&kind=message         一次取完
   → 逐条处理（按 body.msgid 幂等，重复的跳过）
+      是图片（msgtype image / mixed）就先 poll.mjs --download <seq>，再读本地文件
   → poll.mjs --reply <seq> "<结果>"              每条各回一次，1 小时内
   → poll.mjs --ack 33                            确认到区间终点
   → 重新挂起 sentinel.mjs                         必须做，否则之后的消息没人发现
@@ -75,7 +77,7 @@ agent 处理消息的工具。所有请求都带 `X-Relay-Agent`。
 - **先处理再 ack。** ack 之后网关就认为处理完了，中途崩溃会丢。
 - 回复超过 1 小时，改用 `--send`：单聊 `chatid` 填 `body.from.userid`，群聊填 `body.chatid`。
 - 需要追问用户时，直接回复一条 markdown 问句，下一条用户消息会作为新消息进来。
-- 图片要在 300 秒内下载并解密，见 [protocol.md § 媒体文件加密](protocol.md#媒体文件加密)。
+- 收到图片先 `poll.mjs --download <seq>`：企微给的地址 300 秒就失效，但网关收到时已经下过一份，被唤醒晚了也能从网关取到（保留 `media_keep_days` 天）。消息记录里的 `media` 字段能看到网关那份的状态，见 [api.md § media 字段](api.md#media-字段)。
 
 ## 平台示例
 

@@ -7,6 +7,7 @@
  *     "http": { "host": "127.0.0.1", "port": 8788, "api_token": "<openssl rand -hex 32>" },
  *     "tz": "Asia/Shanghai",              // 自报里的时间显示时区
  *     "agent_online_secs": 300,           // 处理端多久没来访就算离线
+ *     "media_keep_days": 90, "media_max_mb": 20,   // 图片下载：保留天数（0 = 永久）、单个文件上限
  *     "bots": [{ "key": "default", "bot_id": "...", "secret": "...", "api_token": "...",
  *                "reply_text": "已收到", "reply_text_offline": "...{duration}...",
  *                "admin_userid": "...", "offline_alert_mins": 0, "msg_log": "..." }]
@@ -95,6 +96,9 @@ export function normalizeConfig(raw, source) {
     pingIntervalMs: num(r.ping_interval_ms, 30000, 'ping_interval_ms', (n) => n >= 1000, '不小于 1000 的数字'),
     outageMinSecs: num(r.outage_min_secs, 3, 'outage_min_secs', (n) => n >= 0, '不小于 0 的数字'),                // 低于这个秒数不报
     outageReportMinMs: num(r.outage_report_min_ms, 60000, 'outage_report_min_ms', (n) => n >= 0, '不小于 0 的数字'), // 抖动时最多每分钟报一次
+    mediaKeepDays: num(r.media_keep_days, 90, 'media_keep_days', (n) => n >= 0, '不小于 0 的数字'),   // 0 = 永久保留
+    mediaMaxMb: num(r.media_max_mb, 20, 'media_max_mb', (n) => n > 0, '大于 0 的数字'),
+    mediaRetryMs: [5000, 15000],   // 图片下载失败后的重试间隔
     subscribeTimeoutMs: 10000,
     backoffMinMs: 1000,
     backoffMaxMs: 60000,
@@ -117,7 +121,7 @@ export function normalizeConfig(raw, source) {
     if (!b.bot_id) errs.push(`${at}: 缺少 bot_id`);
     if (!b.secret) errs.push(`${at}: 缺少 secret`);
     if (b.msg_log != null && typeof b.msg_log !== 'string') errs.push(`${at}: msg_log 必须是字符串路径或 "off"`);
-    // 默认数据文件：每个 bot 一个目录 bots/<key>/，以后媒体下载的 files/ 也放在这个目录下
+    // 默认数据文件：每个 bot 一个目录 bots/<key>/，媒体下载的 files/ 也放在这个目录下
     // 空串 / 纯空白按没写处理：曾被当成 off，网关静默只放内存，重启后数据全无；key 不合法时不拼（反正要报错退出）
     const msgLog = typeof b.msg_log === 'string' && b.msg_log.trim() !== '' ? b.msg_log : keyOk ? path.join(process.cwd(), 'bots', key, 'messages.jsonl') : '';
     return {

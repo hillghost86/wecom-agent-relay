@@ -11,11 +11,11 @@
    │ wss 长连接（30s 心跳 · 断线自动重连）
    ▼
 VPS 网关 server/（7×24 在线，唯一持久层 bots/<key>/messages.jsonl）
-   │ HTTPS API：/health /messages /messages/<seq> /ack /send（多 bot 时加前缀 /bots/<key>/）
+   │ HTTPS API：/health /messages /messages/<seq> /files /ack /send（多 bot 时加前缀 /bots/<key>/）
    ▼
 本机 client/
    ├─ sentinel.mjs   哨兵：轮询发现新消息 → 退出 → 借「后台任务完成通知」唤醒 agent
-   └─ poll.mjs       工具：单条取 / 回复 / 推送 / 推进游标
+   └─ poll.mjs       工具：单条取 / 下载图片 / 回复 / 推送 / 推进游标
 ```
 
 ## 为什么这么设计
@@ -48,7 +48,7 @@ VPS 网关 server/（7×24 在线，唯一持久层 bots/<key>/messages.jsonl）
 │   └── config.example.json   复制为同目录 config.json 填入真实配置
 ├── client/
 │   ├── sentinel.mjs          事件哨兵（本机，agent 后台任务）
-│   ├── poll.mjs              处理客户端（拉取 / 单条取 / 回复 / 推送 / ack）
+│   ├── poll.mjs              处理客户端（拉取 / 单条取 / 下载图片 / 回复 / 推送 / ack）
 │   ├── config.example.json   复制为同目录 config.json 填入真实配置
 │   └── start.example.bat     Windows 挂哨兵示例（%~dp0 相对路径，放哪都能跑）
 └── skill/wecom-agent-relay/  WorkBuddy 一句话安装技能（SKILL.md + 架构说明 + 排障手册）
@@ -163,6 +163,7 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 | `GET /health` | 连接状态、最新 seq、游标，以及处理端在线状态（`agent_online` / `agent_last_seen` / `last_agent`）和 `pending`（未 ack 的真消息数，事件不计） |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息；不带 after 时从已确认游标起；limit 上限 500 |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
+| `GET /files/<YYYY-MM>/<文件名>` | 取网关收到时就下载好的图片；含图片的消息记录里 `media[].file` 就是这个路径 |
 | `GET /ack?seq=<seq>` | 游标推进到 seq（seq 必须是非负整数，否则 400；超过最大 seq 会钳到当前 seq） |
 | `POST /send` | 主动推送。msgtype 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`（**没有 text**）；`chatid` 单聊填 userid、群聊填群 chatid |
 | `GET /bots` | 仅管理员 token：一次看所有机器人的 `/health` |

@@ -5,6 +5,8 @@ config.*.json
 !config.example.json
 sentinel_cursor.json
 bots/
+# poll.mjs --download 的默认下载目录
+client/downloads/
 # 显式把 msg_log 配到部署根目录时的文件名
 messages.jsonl*
 messages.*.jsonl*

@@ -5,12 +5,13 @@
  *   1. 连接 wss://openws.work.weixin.qq.com
  *   2. 发 aibot_subscribe { bot_id, secret }，errcode=0 即订阅成功
  *   3. 每 30s 发 ping 保活；连续两次没收到回包就判定连接死了，重连
- *   4. 收到 aibot_msg_callback：打印 + 追加到 JSONL；5 秒内用同一个 req_id 回一帧 stream
+ *   4. 收到 aibot_msg_callback：打印 + 追加到 JSONL（有图片就交给 media.mjs 异步下载）；5 秒内用同一个 req_id 回一帧 stream
  *   5. 断线：指数退避重连（1s → 60s 上限），永不放弃
  */
 import { randomUUID } from 'node:crypto';
 import { warn, fmtDuration, maskBody, makeFmtTime } from './log.mjs';
 import { sendOutageReport } from './notify.mjs';
+import { imagesOf } from './media.mjs';
 
 /* ---------- WebSocket 实现：优先 ws 包，否则内置 ----------
  * 实测 Node 内置 WebSocket（undici）在某些代理/TUN 环境下对企微网关握手失败（non-101），
@@ -249,7 +250,9 @@ export class BotConnection {
       this.bot.log('【收到消息】', JSON.stringify(maskBody(b)));
       this.bot.log(`  类型=${b.msgtype} 会话=${b.chattype}${b.chatid ? ' chatid=' + b.chatid : ''} 发送人=${b.from?.userid}`);
       if (b.msgtype === 'text') this.bot.log('  文本=', b.text?.content);
-      this.bot.store.append({ kind: 'message', req_id: reqId, body: b });
+      const r = this.bot.store.append({ kind: 'message', req_id: reqId, body: b });
+      // 图片 URL 300 秒就失效，收到就下；enqueue 只挂起异步下载，不耽误下面的回帧
+      if (imagesOf(b).length) this.bot.media.enqueue(r);
     }
 
     // 5 秒内必须回一帧；用同一个 req_id

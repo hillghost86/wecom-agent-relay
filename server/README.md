@@ -50,7 +50,8 @@ journalctl -u wecom-bot -f
 |---|---|
 | `GET /health` | 连接状态、最新 seq、游标，外加 `bot`（配置里的 key）、`agent_online`（true/false/null）、`agent_last_seen`、`last_agent`、`last_ack_at`、`pending`（未 ack 的真消息数，事件不计） |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq 大于 after 的消息；不带 after 时从游标起；`limit` 默认 50、最多 500，一次一条就传 `limit=1` |
-| `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
+| `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404。含图片的记录顶层带 `media`（网关收到即下载的状态），见 [docs/api.md § media 字段](../docs/api.md#media-字段) |
+| `GET /files/<YYYY-MM>/<文件名>` | 取网关下载好的图片（路径即 `media[].file`）；路径不合规 400、不存在 404 |
 | `GET /ack?seq=<seq>` | 游标推进到 seq；超过当前最大 seq 会钳到最大 seq，防止误传大数把后续消息全跳过 |
 | `POST /send` | 透传 `aibot_send_msg` 主动推送（response_url 过期后才用）。`msgtype` 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`，**没有 `text`**；`chatid` 单聊填 userid、群聊填群 chatid；`chat_type` 1=单聊 2=群聊，不填自动兼容。企微拒绝时返回 200 且 `ok:false`，errcode 在 `resp` 里；网关未订阅、等回执超时也返回 200 且 `ok:false`，原因在 `error` 里。不返回 5xx，因为反代/Cloudflare 会用自己的错误页覆盖响应体 |
 
@@ -117,7 +118,7 @@ URL=$(echo "$M" | python3 -c 'import json,sys; m=json.load(sys.stdin)["messages"
 ## 自测
 
 ```bash
-npm test               # 即 node --test test/*.test.mjs：起假网关，76 项断言（含 client/ 两个脚本、presence、配置加载、多 bot）
+npm test               # 即 node --test test/*.test.mjs：起假网关，107 项断言（含 client/ 两个脚本、presence、配置加载、多 bot、图片下载）
 ```
 
 ## 文件

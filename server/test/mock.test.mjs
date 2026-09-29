@@ -16,6 +16,10 @@
  *      GET /bots 总览、presence 按 bot 分开、client 零改动接 /bots/<key>、多 bot 配置校验、日志 [key] 前缀、
  *      不写 msg_log 时默认落到工作目录下 bots/<key>/messages.jsonl（目录启动时自动建）、msg_log 为空串等同于没写、
  *      poll.mjs --ack <seq> 打印实际游标、reply_text_offline 留空时离线也回 reply_text
+ *  13. 图片下载：本地 HTTP 服务模拟腾讯云 COS（块长 32 的 PKCS#7 加密 PNG），另起一个两 bot 的服务端进程，验证收到即下载解密落到
+ *      bots/<key>/files/、index.jsonl、/messages 的 media 字段（ok / pending / failed / deleted）、下载不拖慢回帧、403 重试后失败、
+ *      超过 media_max_mb 不写文件、mixed 多图编号、GET /files 鉴权与路径校验、msg_log=off 的 bot 关闭媒体、按 media_keep_days 清理、
+ *      poll.mjs --download 先直连后兜底、媒体配置项校验、日志与 poll.mjs 拉取摘要不输出图片 url / aeskey（落盘与 API 保留原值）
  */
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -23,6 +27,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { isDeepStrictEqual } from 'node:util';
 import { normalizeConfig } from '../src/config.mjs';
 
 const BOT_ID = 'aibTEST', SECRET = 'sec-TEST';
@@ -86,6 +94,7 @@ let childOut = '';
 child.stdout.on('data', (d) => { childOut += d; });
 child.stderr.on('data', (d) => { childOut += d; });
 let multiChild = null, multiDir = null, multiOut = '';   // 第 12 节，finally 里清理
+let mediaChild = null, mediaDir = null, mediaOut = '', cos = null;   // 第 13 节，finally 里清理
 
 try {
   // 1. 订阅
@@ -305,6 +314,7 @@ try {
     ['msg_log 写成数字', { bots: [{ bot_id: 'x', secret: 'y', msg_log: 5 }] }, /msg_log 必须是字符串路径或 "off"/],
     ['其余数值项越界', { agent_online_secs: 0, outage_min_secs: -1, outage_report_min_ms: 'x', bots: [{ ...okBot, offline_alert_mins: 'abc' }] },
       /agent_online_secs 必须是大于 0 的数字（收到 0）[\s\S]*outage_min_secs 必须是不小于 0 的数字（收到 -1）[\s\S]*outage_report_min_ms 必须是不小于 0 的数字（收到 "x"）[\s\S]*bots\[0\]（default）: offline_alert_mins 必须是不小于 0 的数字（收到 "abc"）/],
+    ['媒体配置写错', { media_keep_days: -1, media_max_mb: 'abc' }, /media_keep_days 必须是不小于 0 的数字（收到 -1）[\s\S]*media_max_mb 必须是大于 0 的数字（收到 "abc"）/],
   ];
   for (const [label, over, re] of cfgCases) {
     fs.writeFileSync(badCfg, JSON.stringify({ http: { port: 0 }, bots: [okBot], ...over }));
@@ -457,15 +467,221 @@ try {
 
   check(/\[test\] 订阅成功，开始心跳/.test(multiOut) && /\[default\] 订阅成功/.test(multiOut) && /Z 订阅成功，开始心跳/.test(childOut) && !/\[default\]/.test(childOut),
     '多 bot 时日志带 [key] 前缀，单 bot 时不带', multiOut.split('\n').find((l) => /\[test\] 订阅成功/.test(l)));
+
+  // 13. 图片下载：本地 HTTP 服务模拟腾讯云 COS，另起一个两 bot 的服务端进程（default 开媒体；other 用 msg_log=off，媒体关闭）
+  // 现场生成一张 1x1 的合法 PNG，按企微的规则加密：key = base64(aeskey + '=')，iv = key 前 16 字节，PKCS#7 块长 32
+  const crc32 = (buf) => { let c = ~0; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; };
+  const pngChunk = (type, data) => {
+    const td = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const len = Buffer.alloc(4), crc = Buffer.alloc(4);
+    len.writeUInt32BE(data.length); crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk('IHDR', ihdr), pngChunk('IDAT', zlib.deflateSync(Buffer.from([0, 255, 0, 0]))), pngChunk('IEND', Buffer.alloc(0))]);
+  const keyBuf = crypto.randomBytes(32);
+  const AESKEY = keyBuf.toString('base64').replace(/=+$/, '');   // 43 字符，和企微给的一样
+  const padN = 32 - (PNG.length % 32);
+  const enc = crypto.createCipheriv('aes-256-cbc', keyBuf, keyBuf.subarray(0, 16)); enc.setAutoPadding(false);
+  const ENC = Buffer.concat([enc.update(Buffer.concat([PNG, Buffer.alloc(padN, padN)])), enc.final()]);
+  // 路径第一段决定行为：ok 正常 / slow 延迟 1.5 秒 / 403 / big 声明超大 Content-Length / bigchunk 不带长度边发边超 / once 第一次正常之后都 403
+  const cosHits = {};
+  cos = http.createServer(async (req, res) => {
+    const p = req.url.split('?')[0];
+    cosHits[p] = (cosHits[p] || 0) + 1;
+    const mode = p.split('/')[1];
+    if (mode === 'slow') await sleep(1500);
+    if (mode === '403' || (mode === 'once' && cosHits[p] > 1)) { res.writeHead(403); return res.end('AccessDenied'); }
+    if (mode === 'big') { res.writeHead(200, { 'content-length': 20000 }); return res.end(Buffer.alloc(20000)); }
+    if (mode === 'bigchunk') { res.writeHead(200); for (let i = 0; i < 20; i++) res.write(Buffer.alloc(1000)); return res.end(); }
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': ENC.length });
+    res.end(ENC);
+  });
+  await new Promise((r) => cos.listen(0, '127.0.0.1', r));
+  const cosBase = `http://127.0.0.1:${cos.address().port}`;
+  const pushedUrls = [];   // 推过的所有图片 url，用来查日志和拉取摘要里没有原文
+  const img = (mode, name) => { const url = `${cosBase}/${mode}/${name}?sign=SIG-${name}`; pushedUrls.push(url); return { url, aeskey: AESKEY }; };
+
+  const { gw: mediaGw } = normalizeConfig({ bots: [okBot] }, 'test');
+  const { gw: mediaBlank } = normalizeConfig({ media_keep_days: '', media_max_mb: ' ', bots: [okBot] }, 'test');
+  check(mediaGw.mediaKeepDays === 90 && mediaGw.mediaMaxMb === 20 && mediaBlank.mediaKeepDays === 90 && mediaBlank.mediaMaxMb === 20,
+    '媒体配置默认值：media_keep_days=90、media_max_mb=20，留空也取默认', JSON.stringify({ keep: mediaGw.mediaKeepDays, max: mediaGw.mediaMaxMb }));
+
+  mediaDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wecom-media-')));
+  const mdPort = await new Promise((r) => { const srv = net.createServer(); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => r(p)); }); });
+  const MD_ADMIN = 'media-admin-token', MD_OTHER = 'media-other-token';
+  const mdCfgFile = path.join(mediaDir, 'config.json');
+  // media_max_mb=0.01（约 10KB）：加密后的 PNG 不到 100 字节，big 路由 20000 字节超限；media_keep_days=1 便于测清理
+  fs.writeFileSync(mdCfgFile, JSON.stringify({
+    http: { host: '127.0.0.1', port: mdPort, api_token: MD_ADMIN }, ws_url: `ws://127.0.0.1:${port}/media`, media_keep_days: 1, media_max_mb: 0.01,
+    bots: [{ key: 'default', bot_id: BOT_ID, secret: SECRET }, { key: 'other', bot_id: BOT2_ID, secret: SECRET2, api_token: MD_OTHER, msg_log: 'off' }],
+  }, null, 2));
+  const filesDir = path.join(mediaDir, 'bots', 'default', 'files');
+  const mdConn = (id) => conns.filter((c) => c.path === '/media' && c.botId === id).pop();   // 重启后取最新那条
+  const startMedia = async () => {
+    const n0 = conns.length;
+    mediaOut = '';
+    // 重试间隔缩到 0.2 / 0.4 秒，否则 403 要等满 5 + 15 秒
+    mediaChild = spawn(process.execPath, [path.join(serverDir, 'src', 'index.mjs'), '--config', mdCfgFile], { cwd: mediaDir, env: { ...process.env, RELAY_TEST_MEDIA_RETRY_MS: '200,400' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    mediaChild.stdout.on('data', (d) => { mediaOut += d; });
+    mediaChild.stderr.on('data', (d) => { mediaOut += d; });
+    await waitFor(() => conns.slice(n0).filter((c) => c.path === '/media' && c.botId).length === 2 && /HTTP API 监听/.test(mediaOut), 8000);
+  };
+  await startMedia();
+
+  const mdBase = `http://127.0.0.1:${mdPort}`;
+  const mdGet = async (p, token = MD_ADMIN) => {
+    const r = await fetch(mdBase + p, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    return { status: r.status, headers: r.headers, buf: Buffer.from(await r.arrayBuffer()) };
+  };
+  const mdJson = async (p, token) => { const r = await mdGet(p, token); return { status: r.status, body: JSON.parse(r.buf.toString()) }; };
+  const until = async (fn, ms = 8000) => { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > ms) throw new Error('timeout'); await sleep(100); } };
+  const getMsg = async (seq, bot = 'default') => (await mdJson(`/bots/${bot}/messages/${seq}`)).body.message;
+  const settled = (seq) => until(async () => { const m = await getMsg(seq); return m.media?.every((x) => x.status !== 'pending') && m; });
+  // 推一条消息，等到回帧，返回 { seq, dt: 回帧耗时 }
+  const mdPush = async (id, msgid, body, bot = 'default') => {
+    const t0 = Date.now();
+    mdConn(id).ws.send(JSON.stringify({ cmd: 'aibot_msg_callback', headers: { req_id: `REQ-${msgid}` }, body: { msgid, chattype: 'single', from: { userid: 'u1' }, ...body } }));
+    await waitFor(() => mdConn(id).frames.some((f) => f.cmd === 'aibot_respond_msg' && f.headers.req_id === `REQ-${msgid}`));
+    const dt = Date.now() - t0;
+    const all = (await mdJson(`/bots/${bot}/messages?after=0&limit=500`)).body.messages;
+    return { seq: all.find((m) => m.body.msgid === msgid).seq, dt };
+  };
+
+  // 13.1 单图：收到即下载，文件、索引、media 字段、body 原样
+  const imgBody = { msgtype: 'image', image: img('ok', 'a.png') };
+  const { seq: sA } = await mdPush(BOT_ID, 'IMG-A', imgBody);
+  const mA = await settled(sA);
+  const month = new Date(mA.received_at).toISOString().slice(0, 7);
+  const fileA = `${month}/${sA}-1.png`;
+  check(fs.existsSync(path.join(filesDir, fileA)) && fs.readFileSync(path.join(filesDir, fileA)).equals(PNG), '图片消息：网关收到即下载解密，写到 bots/default/files/<YYYY-MM>/<seq>-1.png，内容等于原图', fileA);
+  const readIdx = () => fs.readFileSync(path.join(filesDir, 'index.jsonl'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+  check(readIdx().some((e) => e.seq === sA && e.n === 1 && e.status === 'ok' && e.file === fileA && e.bytes === PNG.length && e.type === 'png' && e.at), 'files/index.jsonl 追加了一条 ok 记录');
+  check(isDeepStrictEqual(mA.media, [{ n: 1, status: 'ok', file: fileA, bytes: PNG.length, type: 'png' }]), 'GET /messages/<seq> 在记录顶层附 media: [{ n:1, status:ok, file, bytes, type:png }]', JSON.stringify(mA.media));
+  const mdLog = path.join(mediaDir, 'bots', 'default', 'messages.jsonl');
+  check(isDeepStrictEqual(mA.body, { msgid: 'IMG-A', chattype: 'single', from: { userid: 'u1' }, ...imgBody }) && !fs.readFileSync(mdLog, 'utf-8').includes('"media"'),
+    '消息 body 原样未被修改，落盘的记录里没有 media 字段');
+  const { seq: sT } = await mdPush(BOT_ID, 'TXT-A', { msgtype: 'text', text: { content: 'no image' } });
+  const listed = (await mdJson('/bots/default/messages?after=0')).body.messages;
+  check(!('media' in (await getMsg(sT))) && !('media' in listed.find((m) => m.seq === sT)) && listed.find((m) => m.seq === sA).media?.[0].status === 'ok',
+    '不含图片的消息没有 media 字段；GET /messages 列表里图片消息同样带 media');
+
+  // 13.2 下载进行中是 pending，回帧不等下载
+  const { seq: sS, dt: dtS } = await mdPush(BOT_ID, 'IMG-SLOW', { msgtype: 'image', image: img('slow', 'b.png') });
+  const pS = (await getMsg(sS)).media;
+  check(pS?.length === 1 && pS[0].status === 'pending' && dtS < 1000, '下载进行中 media 为 pending，且回帧没有等下载（模拟 COS 延迟 1.5 秒）', `${JSON.stringify(pS)} 回帧 ${dtS}ms`);
+  check((await settled(sS)).media[0].status === 'ok', '延迟的下载完成后变为 ok');
+
+  // 13.3 失败：403 重试 2 次后 failed；超过 media_max_mb 不重试、不写文件
+  const { seq: s403 } = await mdPush(BOT_ID, 'IMG-403', { msgtype: 'image', image: img('403', 'c.png') });
+  const m403 = await settled(s403);
+  check(m403.media[0].status === 'failed' && m403.media[0].error === 'HTTP 403' && cosHits['/403/c.png'] === 3 && readIdx().some((e) => e.seq === s403 && e.status === 'failed' && e.error === 'HTTP 403'),
+    'COS 返回 403：重试 2 次（共 3 次请求）后 failed，带 error，索引记 failed', `${JSON.stringify(m403.media)} 请求 ${cosHits['/403/c.png']} 次`);
+  const { seq: sBig } = await mdPush(BOT_ID, 'IMG-BIG', { msgtype: 'image', image: img('big', 'd.png') });
+  const { seq: sBig2 } = await mdPush(BOT_ID, 'IMG-BIG2', { msgtype: 'image', image: img('bigchunk', 'd2.png') });
+  const [mBig, mBig2] = [await settled(sBig), await settled(sBig2)];
+  const noFile = (seq) => !fs.existsSync(path.join(filesDir, month)) || !fs.readdirSync(path.join(filesDir, month)).some((f) => f.startsWith(`${seq}-`));
+  check(mBig.media[0].status === 'failed' && /超过上限/.test(mBig.media[0].error) && cosHits['/big/d.png'] === 1 && noFile(sBig), '声明的 Content-Length 超过 media_max_mb：failed、不重试、不写文件', mBig.media[0].error);
+  check(mBig2.media[0].status === 'failed' && /超过上限/.test(mBig2.media[0].error) && noFile(sBig2), '不带 Content-Length、边读边超过 media_max_mb：中止下载，failed、不写文件', mBig2.media[0].error);
+  const mediaLines = mediaOut.split('\n').filter((l) => /图片/.test(l));
+  check(mediaLines.some((l) => new RegExp(`图片已下载 seq=${sA} n=1 ${PNG.length} 字节 png 耗时 \\d+ms`).test(l)) && mediaLines.some((l) => /图片下载失败 .*HTTP 403.*后重试/.test(l)) && !mediaLines.some((l) => l.includes('SIG-') || l.includes(AESKEY)),
+    '图片下载日志带 seq、n、字节数、耗时 / 失败原因，不含 url 和 aeskey', mediaLines.find((l) => /图片已下载/.test(l)));
+
+  // 13.4 mixed：两张图 + 一段文字 → n=1、n=2 两个文件
+  const { seq: sM } = await mdPush(BOT_ID, 'IMG-MIX', { msgtype: 'mixed', mixed: { msg_item: [{ msgtype: 'text', text: { content: '看这两张' } }, { msgtype: 'image', image: img('ok', 'm1.png') }, { msgtype: 'image', image: img('ok', 'm2.png') }] } });
+  const mM = await settled(sM);
+  check(mM.media.length === 2 && mM.media.every((x, i) => x.n === i + 1 && x.status === 'ok' && x.file === `${month}/${sM}-${i + 1}.png`) && [1, 2].every((n) => fs.readFileSync(path.join(filesDir, month, `${sM}-${n}.png`)).equals(PNG)),
+    'mixed 消息两张图一段文字：按图片出现顺序下载成 n=1、n=2 两个文件', JSON.stringify(mM.media.map((x) => x.file)));
+
+  const leaks = (text) => pushedUrls.filter((u) => text.includes(u)).length + (text.includes(AESKEY) ? 1 : 0);
+  check(leaks(mediaOut) === 0 && /"url":"…[^"]{8}","aeskey":"\*\*\*"/.test(mediaOut) && /【收到消息】.*"msgtype":"mixed".*"aeskey":"\*\*\*".*"aeskey":"\*\*\*"/.test(mediaOut),
+    '服务端日志（单图和 mixed 的【收到消息】）不含图片 url 原文和 aeskey：url 只留末 8 位，aeskey 为 ***', mediaOut.split('\n').find((l) => /【收到消息】.*mixed/.test(l))?.slice(0, 200));
+  const rawLog = fs.readFileSync(mdLog, 'utf-8');
+  check(pushedUrls.every((u) => rawLog.includes(JSON.stringify(u))) && rawLog.includes(AESKEY) && isDeepStrictEqual(mM.body.mixed.msg_item[1].image, { url: pushedUrls.find((u) => u.includes('/m1.png')), aeskey: AESKEY }),
+    '落盘记录和 /messages 返回里图片 url、aeskey 仍是完整原值（日志脱敏只作用于日志）');
+
+  // 13.5 GET /files：内容、鉴权、路径校验
+  const gA = await mdGet(`/bots/default/files/${fileA}`);
+  check(gA.status === 200 && gA.headers.get('content-type') === 'image/png' && Number(gA.headers.get('content-length')) === PNG.length && gA.buf.equals(PNG),
+    'GET /bots/default/files/<file> 返回原图字节，content-type image/png，content-length 正确');
+  const gBare = await mdGet(`/files/${fileA}`);
+  check(gBare.status === 200 && gBare.buf.equals(PNG), '无前缀 GET /files/<file> 指向第一个 bot，同样可取');
+  const [g401, g403] = [await mdGet(`/bots/default/files/${fileA}`, ''), await mdGet(`/bots/default/files/${fileA}`, MD_OTHER)];
+  check(g401.status === 401 && g403.status === 403, 'GET /files 无 token 401，另一个 bot 的 token 403', `${g401.status} ${g403.status}`);
+  const badPaths = ['/files/..%2Fconfig.json', '/files/2026-09/x.png', `/files/${month}/1-1.exe`, '/files/2026-9/1-1.png', `/files/${month}/..%2F..%2Fmessages.jsonl`];
+  const badRes = await Promise.all(badPaths.map((p) => mdJson('/bots/default' + p)));
+  check(badRes.every((r) => r.status === 400 && r.body.error === 'bad file path'), 'GET /files 路径不合规（含 ..%2F、非数字文件名、非白名单扩展名）一律 400 bad file path', badRes.map((r) => r.status).join(','));
+  // 字面的 .. 会先被 URL 规范化掉：/files/../config.json 实际是 /config.json，落到 404，配置文件不会被读出
+  const rawTrav = await new Promise((r) => http.get({ host: '127.0.0.1', port: mdPort, path: '/files/../config.json', headers: { authorization: `Bearer ${MD_ADMIN}` } }, (res) => {
+    let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => r({ status: res.statusCode, body: b }));
+  }));
+  check(rawTrav.status === 404 && !rawTrav.body.includes('bot_id'), '字面路径 /files/../config.json 不会读出配置文件（规范化为 /config.json 后 404）', `${rawTrav.status} ${rawTrav.body}`);
+  const g404 = await mdJson('/bots/default/files/2000-01/999-1.png');
+  check(g404.status === 404 && g404.body.error === 'file not found', 'GET /files 合法路径但文件不存在 404 file not found');
+  const { seq: sOff } = await mdPush(BOT2_ID, 'IMG-OFF', { msgtype: 'image', image: img('ok', 'off.png') }, 'other');
+  await sleep(300);
+  const offFile = await mdJson(`/bots/other/files/${fileA}`);
+  check(!('media' in (await getMsg(sOff, 'other'))) && !cosHits['/ok/off.png'] && offFile.status === 404 && offFile.body.error === 'file not found',
+    'msg_log=off 的 bot：图片不下载、记录不附 media、/files 一律 404', `cos 请求 ${cosHits['/ok/off.png'] || 0} 次，/files ${offFile.status}`);
+
+  // 13.6 客户端 poll.mjs --download：execFile 异步跑，同步跑会卡住本进程里的模拟 COS
+  const { execFile } = await import('node:child_process');
+  const mdcdir = fs.mkdtempSync(path.join(mediaDir, 'client-'));
+  fs.copyFileSync(new URL('../../client/poll.mjs', import.meta.url), path.join(mdcdir, 'poll.mjs'));
+  const dlDir = path.join(mdcdir, 'dl');
+  const runDl = (...a) => new Promise((r) => execFile(process.execPath, [path.join(mdcdir, 'poll.mjs'), ...a], {
+    env: { ...process.env, WECOM_API_BASE: `${mdBase}/bots/default`, WECOM_API_TOKEN: MD_ADMIN, WECOM_AGENT_ID: 'dl-agent' }, encoding: 'utf-8', timeout: 40000,
+  }, (err, stdout, stderr) => r({ code: err ? err.code : 0, out: stdout + stderr })));
+  const hitsA = cosHits['/ok/a.png'];
+  const dl1 = await runDl('--download', String(sA), dlDir);
+  const dlA = path.join(dlDir, `${sA}-1.png`);
+  check(dl1.code === 0 && dl1.out.includes(`已保存 ${dlA}（企微直连）`) && fs.readFileSync(dlA).equals(PNG) && cosHits['/ok/a.png'] === hitsA + 1,
+    'poll.mjs --download：刚收到的图片直连企微下载、本机解密，输出「企微直连」，文件等于原图', dl1.out.trim());
+  const { seq: sO } = await mdPush(BOT_ID, 'IMG-ONCE', { msgtype: 'image', image: img('once', 'e.png') });
+  await settled(sO);
+  const dl2 = await runDl('--download', String(sO), dlDir);
+  const dlO = path.join(dlDir, `${sO}-1.png`);
+  check(dl2.code === 0 && dl2.out.includes(`已保存 ${dlO}（网关兜底）`) && fs.readFileSync(dlO).equals(PNG) && cosHits['/once/e.png'] === 2,
+    'poll.mjs --download：直连被 COS 拒绝（403）时从网关 /files 取，输出「网关兜底」，文件正确', dl2.out.trim());
+  const pull = await runDl();
+  check(pull.code === 0 && pull.out.includes(`[图片 x1]（用 --download ${sA} 下载）`) && pull.out.includes(`[图片 x2]（用 --download ${sM} 下载）`) && leaks(pull.out) === 0,
+    'poll.mjs 默认拉取：图片消息显示「[图片 x<张数>]（用 --download <seq> 下载）」，不输出 url / aeskey', pull.out.split('\n').find((l) => /\[图片 x1\]/.test(l)));
+  const dl3 = await runDl('--download', String(sT), dlDir);
+  check(dl3.code === 1 && dl3.out.includes(`seq=${sT} 没有图片`), 'poll.mjs --download 没有图片的消息报「没有图片」退出 1', dl3.out.trim());
+  const dl4 = await runDl('--download', String(s403), dlDir);
+  check(dl4.code === 1 && /第 1 张失败：直连失败：HTTP 403；网关下载也失败了：HTTP 403/.test(dl4.out) && !dl4.out.includes('SIG-') && !dl4.out.includes(AESKEY),
+    'poll.mjs --download 直连和网关都失败时写明原因、退出 1，不打印 url / aeskey', dl4.out.trim());
+  const dlDef = await runDl('--download', String(sM));
+  check(dlDef.code === 0 && [1, 2].every((n) => fs.existsSync(path.join(mdcdir, 'downloads', `${sM}-${n}.png`))), 'poll.mjs --download 不给目录时存到脚本旁的 downloads/，mixed 两张都保存');
+
+  // 13.7 清理：把这个月的文件 mtime 改到 3 天前（media_keep_days=1），重启进程，启动时清理
+  const monthDir = path.join(filesDir, month);
+  const old = new Date(Date.now() - 3 * 86400000);
+  for (const f of fs.readdirSync(monthDir)) fs.utimesSync(path.join(monthDir, f), old, old);
+  const keepFile = path.join(filesDir, '2000-01', '999-1.png');
+  fs.mkdirSync(path.dirname(keepFile), { recursive: true });
+  fs.writeFileSync(keepFile, PNG);   // mtime 是现在，不该被删
+  const mdExit = new Promise((r) => mediaChild.once('exit', r));
+  mediaChild.kill('SIGTERM');
+  await mdExit;
+  await startMedia();
+  check(!fs.existsSync(monthDir) && fs.existsSync(keepFile) && fs.existsSync(path.join(filesDir, 'index.jsonl')) && /已清理 \d+ 个超过 1 天的媒体文件/.test(mediaOut),
+    '按 media_keep_days 清理：过期文件被删、空的月份目录被删，新文件和 index.jsonl 保留', mediaOut.split('\n').find((l) => /已清理/.test(l)));
+  const mAfter = await getMsg(sA);
+  check(isDeepStrictEqual(mAfter.media, [{ n: 1, status: 'deleted' }]) && (await getMsg(s403)).media[0].status === 'failed', '清理后 API 显示 deleted（索引重启后重新加载，failed 保持 failed）', JSON.stringify(mAfter.media));
 } catch (e) {
   check(false, '异常: ' + e.message);
   console.log('--- 客户端输出 ---\n' + childOut);
   if (multiOut) console.log('--- 多 bot 进程输出 ---\n' + multiOut);
+  if (mediaOut) console.log('--- 图片下载进程输出 ---\n' + mediaOut);
 } finally {
   child.kill('SIGTERM');
   // 等它退出再删目录：退出时会写 .state.json / .alive，和删除赛跑会 ENOTEMPTY
   if (multiChild && multiChild.exitCode === null) { const exited = new Promise((r) => multiChild.once('exit', r)); multiChild.kill('SIGTERM'); await exited; }
   if (multiDir) fs.rmSync(multiDir, { recursive: true, force: true });
+  if (mediaChild && mediaChild.exitCode === null) { const exited = new Promise((r) => mediaChild.once('exit', r)); mediaChild.kill('SIGTERM'); await exited; }
+  if (mediaDir) fs.rmSync(mediaDir, { recursive: true, force: true });
+  if (cos) cos.close();
   wss.close();
   try { fs.unlinkSync(tmpLog); } catch {}
   try { fs.unlinkSync(tmpLog + '.state.json'); } catch {}
