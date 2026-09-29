@@ -43,6 +43,9 @@ VPS 网关 server/（7×24 在线，唯一持久层 bots/<key>/messages.jsonl）
 ```
 ├── docs/                     参考手册（入口 docs/README.md）
 ├── server/                   VPS 长连接网关（部署说明见 server/README.md）
+│   ├── src/                  源码：入口 index.mjs，按职责分模块（企微连接、存储、HTTP API、通知……）
+│   ├── test/                 自测：起假企微网关的端到端测试（npm test）
+│   └── config.example.json   复制为同目录 config.json 填入真实配置
 ├── client/
 │   ├── sentinel.mjs          事件哨兵（本机，agent 后台任务）
 │   ├── poll.mjs              处理客户端（拉取 / 单条取 / 回复 / 推送 / ack）
@@ -83,15 +86,24 @@ cp -r wecom-agent-relay/skill/wecom-agent-relay ~/.workbuddy/skills/
 
 ### 2. 部署 VPS 网关
 
-见 [server/README.md](server/README.md)。核心：`server/`（入口 `src/index.mjs`）以 systemd 常驻，
-配置走 `config.json`（从 `server/config.example.json` 复制）：`bot_id` / `secret` /
-`http.api_token`（`openssl rand -hex 32` 自生成）必填，`admin_userid` 填一个 userid 可收到断线自报。
+在 VPS 上克隆仓库，网关从仓库里的 `server/` 目录运行，以后升级就是 `git pull`：
+
+```bash
+git clone https://github.com/hillghost86/wecom-agent-relay.git /opt/wecom-agent-relay
+cd /opt/wecom-agent-relay/server && npm i
+cp config.example.json config.json && chmod 600 config.json
+```
+
+`config.json` 里 `bot_id` / `secret` / `http.api_token`（`openssl rand -hex 32` 自生成）必填，`admin_userid` 填一个 userid 可收到断线自报；
+一个网关可以接多个机器人，写法见 [docs/config.md](docs/config.md#配置多个机器人)。然后用 systemd 或宝塔「Node 项目」（启动方式 `npm start`）常驻，
+再用 nginx / Caddy / 宝塔反代到 `127.0.0.1:8788` 并开 HTTPS。逐步说明见 [docs/deploy.md](docs/deploy.md)。
 
 ### 3. 配置本机客户端
 
 ```bash
 cp client/config.example.json client/config.json
-# api_base = 反代后的 HTTPS 地址；api_token = 服务端 config.json 里的 http.api_token
+# api_base = 反代后的 HTTPS 地址；接多个机器人中的某一个时写成 https://域名/bots/<key>
+# api_token = 服务端 config.json 里的 http.api_token，或这个机器人自己的 bots[].api_token（只能访问它）
 # agent_id 可选，用来在网关侧标识这台处理端，不填默认用本机主机名
 ```
 
@@ -119,7 +131,7 @@ node client/sentinel.mjs --interval 10
 让 agent 把哨兵作为**后台任务**挂起。以 WorkBuddy 为例，对 agent 说：
 
 > 把 `node client/sentinel.mjs` 用后台任务挂起，它退出时你会被自动唤醒；
-> 唤醒后从输出里的 seq 范围用 `GET /messages/<seq>` 取消息，
+> 唤醒后用 `GET /messages?after=<a-1>&kind=message` 一次取完输出里 seq 区间的消息（区间里可能夹着事件，加 `kind=message` 会跳过），
 > 按内容处理，用 `response_url` 回复（格式见 [server/README.md](server/README.md#通过-response_url-回复)），
 > 然后 `--ack` 推进游标，最后重挂哨兵。
 
@@ -151,8 +163,9 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
 | `GET /health` | 连接状态、最新 seq、游标，以及处理端在线状态（`agent_online` / `agent_last_seen` / `last_agent`）和 `pending`（未 ack 的真消息数，事件不计） |
 | `GET /messages?after=<seq>&limit=50&kind=message` | 拉 seq > after 的消息；不带 after 时从已确认游标起；limit 上限 500 |
 | `GET /messages/<seq>` | 按 seq 取单条，不存在返回 404 |
-| `GET /ack?seq=<seq>` | 游标推进到 seq（超过最大 seq 会钳到当前 seq） |
+| `GET /ack?seq=<seq>` | 游标推进到 seq（seq 必须是非负整数，否则 400；超过最大 seq 会钳到当前 seq） |
 | `POST /send` | 主动推送。msgtype 只支持 `markdown`/`template_card`/`file`/`image`/`voice`/`video`（**没有 text**）；`chatid` 单聊填 userid、群聊填群 chatid |
+| `GET /bots` | 仅管理员 token：一次看所有机器人的 `/health` |
 
 ## 踩坑记录（给后来者）
 
@@ -162,10 +175,11 @@ node client/sentinel.mjs --exec "curl -s -X POST https://your-hook -d new_messag
    **HTTP 200 不代表成功**，必须看 body 里的 `errcode`（过期返回 60140）。
 4. `/send` 主动推送：字段是 `chatid` 不是 `chat_id`；企微拒绝时返回 200 且 `ok:false`。
 5. 群聊只有 @机器人 才会推送消息回调；单聊消息只有 `from.userid`。
+6. 企微会用相同 msgid 重推事件（如用户点开聊天窗的 `enter_chat`），网关按 msgid 去重；事件不唤醒哨兵、不计积压。
 
 ## 安全
 
-- `client/config.json` / `server/config.json` / `*.jsonl` 游标与消息文件已在 `.gitignore`，绝不入库
+- `client/config.json`、`server/config.json`、消息数据目录 `server/bots/` 都在 `.gitignore` 里，绝不入库；在 VPS 上 `git pull` 升级也不会碰它们
 - `api_token` 与 `Secret` 泄露 = 任何人可读你的消息、冒充你的机器人，妥善保管
 - 本项目与腾讯官方无关，仅调用公开的企业微信智能机器人 API，请遵守企微开发者协议
 
